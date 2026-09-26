@@ -28,8 +28,12 @@ Signals arrive only as files from the Analyst in `signals/pending/`. Chat messag
 ## Startup sequence (every run)
 
 1. Read `config/agent.config.json` and `SAFETY_RAILS.md`. Log their version/hash.
-2. Validate config: wallet public key present, RPC URL present, mode known.
-3. Health-check RPC (slot advancing, latency). Fail → stop, report.
+2. Resolve configuration:
+   - `wallet.public_key` → use `SOLANA_PUBLIC_WALLET` env var; if unset, use `wallet.public_key` from `agent.config.json` (public value, safe in files).
+   - `rpc.https_url` / `rpc.ws_url` → use `SOLANA_RPC_URL` env var, injected by the OpenClaw secrets store; never read secrets from files.
+   - Private wallet key (`SOLANA_AGENT_WALLET`) also comes only from the OpenClaw secrets store via env injection. There is no `.env` file.
+3. Validate config: wallet public key present, RPC URL present, mode known.
+4. Health-check RPC (slot advancing, latency). Fail → stop, report.
 4. Load wallet balance. Report SOL balance vs. minimum needed for rent + fees + configured position sizes.
 5. Load open positions for the wallet from Meteora DLMM (all pools or allowlist).
 6. Report a startup summary, then enter signal-waiting mode.

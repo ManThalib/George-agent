@@ -4,7 +4,7 @@
   "agent": {
     "name": "dlmm-executor",
     "note": "Working name. Owner will rename later.",
-    "mode": "confirm_each",
+    "mode": "auto",
     "mode_options": {
       "dry_run": "Simulate only. Never signs. Safe default.",
       "confirm_each": "Every transaction is paused and shown to the owner for explicit approval.",
@@ -14,8 +14,8 @@
   },
 
   "wallet": {
-    "public_key": "",
-    "_comment": "Set SOLANA_PUBLIC_WALLET env var; falls back to this value.",
+    "public_key": "QNsxSBe2tHb7RSQYh6TUBUQA2wD93PvPP5Jg3qUxPvj",
+    "_comment": "Public address — safe in files. Env var SOLANA_PUBLIC_WALLET overrides if set.",
     "_secret_key_handling": {
       "method": "openclaw_secrets_store",
       "secret_ref": "SOLANA_AGENT_WALLET",
@@ -30,7 +30,10 @@
     "ws_url": "",
     "_comment": "Set SOLANA_RPC_URL env var; falls back to this value.",
     "commitment": "confirmed",
-    "timeout_seconds": 30
+    "timeout_seconds": 30,
+    "fallback_https_urls": ["https://api.mainnet-beta.solana.com"],
+    "fallback_delay_seconds": 15,
+    "_fallback_comment": "If the primary RPC accepts a send but the tx never confirms, the executor re-broadcasts the identical signed raw tx to these endpoints after fallback_delay_seconds, then keeps confirming via the primary. Identical tx = identical signature, so there is no double-land risk. Keyless endpoints only in this file; a second paid RPC goes through the SOLANA_RPC_FALLBACK_URLS env var (comma-separated) instead of here."
   },
 
   "analyst_feed": {
