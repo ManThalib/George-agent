@@ -1,0 +1,47 @@
+{
+  "_readme": "This is the ONLY place the executor reads its settings from. The agent re-reads this file before every transaction, so edits take effect on its next check without restarting it.",
+
+  "agent": {
+    "name": "dlmm-executor",
+    "note": "Working name. Owner will rename later.",
+    "mode": "confirm_each",
+    "mode_options": {
+      "dry_run": "Simulate only. Never signs. Safe default.",
+      "confirm_each": "Every transaction is paused and shown to the owner for explicit approval.",
+      "auto": "Executes automatically when ALL rails pass. Only set this yourself, deliberately."
+    },
+    "version": "0.1.0"
+  },
+
+  "wallet": {
+    "public_key": "",
+    "_comment": "Set SOLANA_PUBLIC_WALLET env var; falls back to this value.",
+    "_secret_key_handling": {
+      "method": "openclaw_secrets_store",
+      "secret_ref": "SOLANA_AGENT_WALLET",
+      "how": "Say 'store the wallet key' in chat. Jarvis will request it via a masked secret prompt — the private key is never visible in chat, logs, or files.",
+      "never": "Do NOT paste the private key into this file or into chat."
+    }
+  },
+
+  "rpc": {
+    "provider": "helius",
+    "https_url": "",
+    "ws_url": "",
+    "_comment": "Set SOLANA_RPC_URL env var; falls back to this value.",
+    "commitment": "confirmed",
+    "timeout_seconds": 30
+  },
+
+  "analyst_feed": {
+    "note": "Where signals come from: Sheldon (scoring evaluator) writes George-schema signal files into signals/pending/; the signal-wake doorbell notifies this agent when new files land.",
+    "analyst_agent_id": "sheldon",
+    "signal_max_age_seconds": 300,
+    "heartbeat_interval_seconds": 60
+  },
+
+  "jupiter_routing": {
+    "use_for_swap_legs": true,
+    "note": "When opening/closing needs a token swap leg (position consists of one token), route via Jupiter with slippage capped by the rails."
+  }
+}

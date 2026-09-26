@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+
+# Runtime state — never versioned
+agents/meteora-dlmm/signals/pending/*
+agents/meteora-dlmm/signals/processed/*
+agents/meteora-dlmm/approvals/pending/*
+agents/meteora-dlmm/approvals/rejected/*
+agents/meteora-dlmm/journal/*
+agents/meteora-dlmm/KILL
+!agents/meteora-dlmm/signals/pending/.gitkeep
+!agents/meteora-dlmm/signals/processed/.gitkeep
+!agents/meteora-dlmm/approvals/pending/.gitkeep
+!agents/meteora-dlmm/approvals/rejected/.gitkeep
+
+# Secrets — never versioned, ever
+.env
+.env.*
+*.key
