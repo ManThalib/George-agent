@@ -15,6 +15,7 @@
 import process from "node:process";
 import { Connection, PublicKey, Keypair } from "@solana/web3.js";
 import { respond, respondError, readRequest, log } from "./common.js";
+import { configureSendFallbacks } from "./tx.js";
 import * as meteora from "./meteora.js";
 import * as raydium from "./raydium.js";
 import * as orca from "./orca.js";
@@ -69,6 +70,21 @@ async function main() {
       wsEndpoint: req.rpc_ws_url || undefined,
     });
 
+    // Send-path fallback endpoints: if the primary accepts the tx but the
+    // cluster never sees it, confirmSignedTx re-broadcasts the identical raw
+    // tx to these and keeps confirming via the primary. URLs here must not
+    // carry API keys — key-bearing endpoints come via SOLANA_RPC_FALLBACK_URLS.
+    const fallbackUrls = Array.isArray(req.fallback_rpc_urls)
+      ? req.fallback_rpc_urls
+      : [];
+    const badFallbacks = fallbackUrls.filter((u) => typeof u !== "string" || !u.startsWith("https://"));
+    if (badFallbacks.length) throw new Error(`fallback_rpc_urls must be https URLs, got: ${badFallbacks.join(", ")}`);
+    configureSendFallbacks({
+      connections: fallbackUrls.map((u) => new Connection(u, { commitment: req.commitment || "confirmed" })),
+      delayMs: Number(req.fallback_delay_seconds) > 0 ? Number(req.fallback_delay_seconds) * 1000 : undefined,
+    });
+    if (fallbackUrls.length) log(`send fallbacks armed: ${fallbackUrls.length} endpoint(s), delay ${Number(req.fallback_delay_seconds) || 15}s`);
+
     let wallet;
     if (req.mode === "send") {
       wallet = loadKeypair();
@@ -87,7 +103,17 @@ async function main() {
     else if (req.action === "claim") result = await handler.claimFees(req, connection, wallet);
     else if (req.action === "swap") result = await jupiter.swap(req, connection, wallet);
 
-    respond({ ok: true, dex: req.dex, action: req.action, mode: req.mode, ...result });
+    respond({ ok: true, dex: req.dex, action: req.action, mode: req.mode, ...result }, () => {
+      // Send mode: a losing confirmPromise in confirmSignedTx (rescue path —
+      // primary send threw, fallback broadcast succeeded — or a primary ws
+      // confirm that never settles) keeps its web3.js signature websocket
+      // subscription alive, so the node process never exits after printing
+      // its response (observed fallback-test-004, 2026-09-26: hung until
+      // killed at 110s). Exit once the response is flushed. Happy path is
+      // behavior-preserving: the confirmPromise already settled there and the
+      // process exits naturally anyway.
+      if (req.mode === "send") process.exit(0);
+    });
   } catch (err) {
     log("uncaught error:", err);
     respondError("dispatch", err);

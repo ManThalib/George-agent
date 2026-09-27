@@ -31,7 +31,8 @@ DEFAULT_RAILS: Dict[str, Any] = {
     "min_pool_liquidity_usd": 250000.0,
     "min_24h_volume_usd": 1000000.0,
     "allowed_bin_steps": [10, 20, 25, 50, 100],
-    "max_bin_range_width": 200,
+    # Sheldon's adaptive ranges can use up to 1000 bins per side (2000 total).
+    "max_bin_range_width": 2000,
     "reject_active_bin_out_of_range_open": True,
     "open_window_utc": "00:00-23:59",
     "close_window_utc": "00:00-23:59",

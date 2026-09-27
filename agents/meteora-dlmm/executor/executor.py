@@ -14,6 +14,7 @@ Usage:
     python3 executor.py --approve <signal_id>
     python3 executor.py --reject <signal_id>
     python3 executor.py --list-approvals
+    python3 executor.py --list-dust-swaps
     python3 executor.py --check
 """
 
@@ -33,6 +34,7 @@ from rails_loader import load_rails
 from signal_validator import SignalValidationError, validate, validate_dict
 import tx_builder
 import approvals as approvals_store
+import dust_queue
 
 
 SIGNALS_DIR = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/signals")
@@ -91,6 +93,12 @@ def process_signal(signal_path: Path, cfg: Dict[str, Any], rails: Dict[str, Any]
     except SignalValidationError as exc:
         return "rejected", {"error": str(exc), "signal_id": signal_path.stem}
 
+    # swap_to_usdc signals are never executed automatically.  They are queued
+    # for manual review regardless of the configured mode.  This is the single
+    # place where the new Sheldon action is routed away from the send path.
+    if signal.get("action") == "swap_to_usdc":
+        return _queue_swap_to_usdc(signal, cfg, rails)
+
     mode = cfg.get("mode", "dry_run")
     if mode == "auto":
         return _handle_auto(signal, cfg, rails)
@@ -99,6 +107,21 @@ def process_signal(signal_path: Path, cfg: Dict[str, Any], rails: Dict[str, Any]
     # dry_run / anything else
     decision, details = _run_simulation(signal, cfg, rails)
     return decision, details
+
+
+def _queue_swap_to_usdc(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    """Queue a validated swap_to_usdc signal for manual review."""
+    path = dust_queue.queue(signal)
+    _notify_owner(
+        f"DUST SWAP QUEUED signal={signal['signal_id']} "
+        f"mint={signal.get('mint')} symbol={signal.get('symbol')} "
+        f"value_usd={signal.get('value_usd')}. "
+        f"Review: python3 executor/executor.py --list-dust-swaps"
+    )
+    return "queued_for_review", {
+        "queue_path": str(path),
+        "notes": f"queued swap_to_usdc for review: {signal.get('reason', '')}",
+    }
 
 
 def _handle_auto(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
@@ -145,7 +168,15 @@ def _do_send(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any])
     except Exception as exc:
         return "failed", {"stage": "send", "error": str(exc), "traceback": traceback.format_exc()}
 
-    return "executed", {"result": result}
+    details: Dict[str, Any] = {"result": result}
+    # Confirmation provenance: how the send confirmed (primary-confirm vs
+    # fallback-read) and which endpoints the identical raw tx was re-broadcast
+    # to. Surfaced at the top level so journal entries show a silent
+    # Helius drop+rescue without digging into details.result.
+    for key in ("confirmed_via", "fallback_broadcast", "confirmations"):
+        if isinstance(result, dict) and result.get(key) is not None:
+            details[key] = result[key]
+    return "executed", details
 
 
 def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> None:
@@ -173,7 +204,7 @@ def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> None:
             rails_hash=rails_hash_from_path(),
         )
         print(f"  {signal_path.name} -> {status}: {details.get('error') or details.get('notes', '')}")
-        if status in {"rejected", "failed", "awaiting_approval", "dry_run", "executed"}:
+        if status in {"rejected", "failed", "awaiting_approval", "dry_run", "executed", "queued_for_review"}:
             _move_to_processed(signal_path)
 
 
@@ -241,6 +272,20 @@ def do_list_approvals() -> None:
         print(f"{sid:<40} {sig.get('action',''):<8} {sig.get('dex',''):<10} {sig.get('pool_address','')}")
 
 
+def do_list_dust_swaps() -> None:
+    records = dust_queue.list_pending()
+    if not records:
+        print("No dust swaps pending review.")
+        return
+    print(f"{'Signal ID':<40} {'Symbol':<10} {'Value USD':<10} Reason")
+    for rec in records:
+        sig = rec.get("signal", {})
+        print(
+            f"{rec.get('signal_id', ''):<40} {sig.get('symbol', ''):<10} "
+            f"{str(sig.get('value_usd', '')):<10} {sig.get('reason', '')}"
+        )
+
+
 def do_check(cfg: Dict[str, Any]) -> None:
     print("Executor health check")
     print(f"  mode: {cfg.get('mode')}")
@@ -263,6 +308,7 @@ def main() -> None:
     parser.add_argument("--approve", metavar="SIGNAL_ID", help="Approve and send a pending transaction")
     parser.add_argument("--reject", metavar="SIGNAL_ID", help="Reject a pending approval")
     parser.add_argument("--list-approvals", action="store_true", help="List pending approvals")
+    parser.add_argument("--list-dust-swaps", action="store_true", help="List swap_to_usdc signals pending review")
     parser.add_argument("--check", action="store_true", help="Health check")
     args = parser.parse_args()
 
@@ -277,6 +323,9 @@ def main() -> None:
         return
     if args.list_approvals:
         do_list_approvals()
+        return
+    if args.list_dust_swaps:
+        do_list_dust_swaps()
         return
     if args.check:
         do_check(cfg)

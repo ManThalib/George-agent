@@ -15,7 +15,7 @@
   "min_pool_liquidity_usd": 250000,
   "min_24h_volume_usd": 1000000,
   "allowed_bin_steps": [10, 20, 25, 50, 100],
-  "max_bin_range_width": 200,
+  "max_bin_range_width": 2000,
   "reject_active_bin_out_of_range_open": true,
   "open_window_utc": "00:00-23:59",
   "close_window_utc": "00:00-23:59",

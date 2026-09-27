@@ -64,6 +64,8 @@ def _request_from_signal(mode: str, signal: Dict[str, Any], cfg: Dict[str, Any],
     base: Dict[str, Any] = {
         "mode": mode,
         "rpc_url": cfg["rpc_https_url"],
+        "fallback_rpc_urls": cfg.get("rpc_fallback_urls", []),
+        "fallback_delay_seconds": cfg.get("rpc_fallback_delay_seconds", 15),
         "wallet_public_key": cfg["wallet_public_key"],
         "max_slippage_bps": slippage,
         "priority_fee_cap_sol": rails.get("priority_fee_cap_sol", 0.0005),

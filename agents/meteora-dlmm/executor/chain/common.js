@@ -20,8 +20,8 @@ for (const fn of ["log", "info", "debug", "warn", "trace"]) {
   console[fn] = stderrLog;
 }
 
-export function respond(obj) {
-  process.stdout.write(JSON.stringify(obj) + "\n");
+export function respond(obj, onFlush) {
+  process.stdout.write(JSON.stringify(obj) + "\n", onFlush);
 }
 
 export function respondError(stage, err) {

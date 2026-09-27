@@ -84,8 +84,8 @@ export async function closePosition(req, connection, wallet) {
     return { tx_base64: [require("./tx.js").txToBase64(tx)], simulation: sim };
   }
 
-  const { signature, slot } = await signAndSend(connection, tx, wallet, []);
-  return { signature, slot };
+  const { signature, slot, confirmed_via, fallback_broadcast } = await signAndSend(connection, tx, wallet, []);
+  return { signature, slot, confirmed_via, ...(fallback_broadcast ? { fallback_broadcast } : {}) };
 }
 
 export async function claimFees(req, connection, wallet) {
@@ -114,6 +114,6 @@ export async function claimFees(req, connection, wallet) {
     return { tx_base64: [require("./tx.js").txToBase64(tx)], simulation: sim };
   }
 
-  const { signature, slot } = await signAndSend(connection, tx, wallet, []);
-  return { signature, slot };
+  const { signature, slot, confirmed_via, fallback_broadcast } = await signAndSend(connection, tx, wallet, []);
+  return { signature, slot, confirmed_via, ...(fallback_broadcast ? { fallback_broadcast } : {}) };
 }

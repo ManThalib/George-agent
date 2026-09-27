@@ -70,8 +70,14 @@ export async function openPosition(req, connection, wallet) {
     };
   }
 
-  const { signature, slot } = await signAndSend(connection, tx, wallet, res.signers);
-  return { signature, slot, position_id: res.extInfo?.nftMint?.toBase58?.() ?? null };
+  const { signature, slot, confirmed_via, fallback_broadcast } = await signAndSend(connection, tx, wallet, res.signers);
+  return {
+    signature,
+    slot,
+    confirmed_via,
+    ...(fallback_broadcast ? { fallback_broadcast } : {}),
+    position_id: res.extInfo?.nftMint?.toBase58?.() ?? null,
+  };
 }
 
 export async function closePosition(req, connection, wallet) {
@@ -97,8 +103,8 @@ export async function closePosition(req, connection, wallet) {
     return { tx_base64: [txToBase64(tx)], simulation: sim };
   }
 
-  const { signature, slot } = await signAndSend(connection, tx, wallet, res.signers);
-  return { signature, slot };
+  const { signature, slot, confirmed_via, fallback_broadcast } = await signAndSend(connection, tx, wallet, res.signers);
+  return { signature, slot, confirmed_via, ...(fallback_broadcast ? { fallback_broadcast } : {}) };
 }
 
 export async function claimFees(req, connection, wallet) {
@@ -123,9 +129,12 @@ export async function claimFees(req, connection, wallet) {
   }
 
   const signatures = [];
+  const confirmations = [];
   for (const tx of txs) {
-    const { signature } = await signAndSend(connection, tx, wallet);
+    const sent = await signAndSend(connection, tx, wallet);
+    const { signature, confirmed_via, fallback_broadcast } = sent;
     signatures.push(signature);
+    confirmations.push({ signature, confirmed_via, ...(fallback_broadcast ? { fallback_broadcast } : {}) });
   }
-  return { signatures };
+  return { signatures, confirmations };
 }

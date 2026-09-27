@@ -10,6 +10,7 @@ Its ONLY job: receive signals from the **Analyst sub-agent** and execute them sa
 Supported signal types:
 - `swap` — swap tokens via Jupiter.
 - `open` / `close` / `claim_fees` / `claim_rewards` — manage concentrated-liquidity positions on Meteora DLMM, Raydium CLMM, and Orca Whirlpool.
+- `swap_to_usdc` — queue a non-SOL/non-USDC dust asset for manual review; never executed automatically.
 
 This agent does **not** decide *when* or *what* to trade. It decides **whether a signal is safe to execute**, and then executes it.
 
