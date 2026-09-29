@@ -19,13 +19,17 @@ Usage:
 """
 
 import argparse
+import fcntl
+import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 import traceback
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from common.utils import utc_now, load_json, rails_hash
 from common.config_loader import ConfigError, load_config
@@ -39,6 +43,232 @@ import common.dust_queue as dust_queue
 
 SIGNALS_DIR = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/signals")
 KILL_FILE = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/KILL")
+
+# --- Capital refresh chain (swap -> wallet rescan -> Sheldon re-entry) ---
+# After a successful prep swap the wallet changed; Missy's wallet screener
+# re-reads balances and Sheldon re-evaluates (emitting the open when funded).
+WALLET_REFRESH_SCRIPT = "/data/missy-agent/wallet_screener/run_wallet.sh"
+WALLET_SCAN_DIR = "/data/missy-data/wallet_screens"
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+SHELDON_CYCLE_CMD = ["python3", "/data/.openclaw/workspace-agents/sheldon/scoring/run_cycle.py", "--write-signals"]
+REENTRY_STATE_PATH = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/state/capital_reentry.json")
+LOCK_PATH = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/state/dispatcher.lock")
+MAX_CAPITAL_REENTRIES_PER_HOUR = 8
+# A prep swap re-enters the dispatcher after Sheldon re-scores (to process
+# the open, or another prep swap). Depth bounds the in-process chain; the
+# hourly re-entry guard above is the outer backstop.
+MAX_CAPITAL_CHAIN_DEPTH = 3
+
+
+@contextmanager
+def _dispatcher_lock(timeout_seconds: int = 600):
+    """Serialize dispatcher runs: pending signals must never be processed
+    concurrently, or the same swap executes twice (seen live 2026-09-29:
+    nested refresh follow-ups re-executed one prep swap three times)."""
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(LOCK_PATH, "w")
+    deadline = time.time() + timeout_seconds
+    try:
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.time() >= deadline:
+                    raise TimeoutError(f"dispatcher lock not free after {timeout_seconds}s")
+                time.sleep(1)
+        yield
+    finally:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+        finally:
+            fh.close()
+
+
+def _reentry_window(state: Dict[str, Any], now: float) -> List[float]:
+    """Timestamps of capital re-entries inside the last hour."""
+    stamps = state.get("timestamps") or []
+    return [t for t in stamps if isinstance(t, (int, float)) and now - t < 3600]
+
+
+def _reentry_allowed(state: Dict[str, Any], now: float) -> Tuple[bool, str]:
+    recent = _reentry_window(state, now)
+    if len(recent) >= MAX_CAPITAL_REENTRIES_PER_HOUR:
+        return False, f"loop guard: {len(recent)} capital re-entries in the last hour"
+    return True, ""
+
+
+def _load_reentry_state() -> Dict[str, Any]:
+    try:
+        with open(REENTRY_STATE_PATH, "r", encoding="utf-8") as fh:
+            state = json.load(fh)
+        if isinstance(state, dict):
+            return state
+    except Exception:
+        pass
+    return {"timestamps": []}
+
+
+def _save_reentry_state(state: Dict[str, Any]) -> None:
+    try:
+        REENTRY_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(REENTRY_STATE_PATH, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=2)
+    except Exception as exc:
+        print(f"[{utc_now()}] capital re-entry state save failed: {exc}")
+
+
+def _read_latest_usdc_raw() -> Optional[int]:
+    """USDC raw balance from the newest wallet scan (verification only)."""
+    scans = sorted(
+        p for p in os.listdir(WALLET_SCAN_DIR)
+        if p.startswith("wallet_screen-") and p.endswith(".json")
+    ) if os.path.isdir(WALLET_SCAN_DIR) else []
+    if not scans:
+        return None
+    path = os.path.join(WALLET_SCAN_DIR, scans[-1])  # latest.json sorts last
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return None
+    for a in data.get("assets", []):
+        if a.get("mint") == USDC_MINT:
+            try:
+                return int(a.get("amount_raw") or 0)
+            except (TypeError, ValueError):
+                return None
+    return 0
+
+
+def _run_wallet_refresh(cfg: Dict[str, Any], expected_usdc_delta: int = 0,
+                        ambiguous: bool = False) -> str:
+    rpc = cfg.get("rpc_https_url")
+    wallet = cfg.get("wallet_public_key")
+    if not rpc or not wallet:
+        return "skipped (missing rpc_https_url / wallet_public_key in config)"
+    env = {**os.environ, "SOLANA_RPC_URL": rpc, "WALLET_PUBLIC_KEY": wallet}
+    pre = _read_latest_usdc_raw()
+    last_out = ""
+    cur: Optional[int] = pre
+    for attempt in range(4):
+        try:
+            proc = subprocess.run(
+                ["bash", WALLET_REFRESH_SCRIPT], env=env, capture_output=True,
+                text=True, timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            return "FAILED (timeout after 120s)"
+        except Exception as exc:
+            return f"FAILED ({exc})"
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:] or ["no output"]
+            return f"FAILED exit={proc.returncode}: {tail[0][:160]}"
+        last_out = (proc.stdout or "").strip().splitlines()[-1:]
+        cur = _read_latest_usdc_raw()
+        if cur is None or pre is None:
+            return f"ok -> {last_out[0] if last_out else ''}"
+        if expected_usdc_delta < 0 and cur <= pre + int(expected_usdc_delta * 0.9):
+            return f"ok (usdc {pre} -> {cur}) -> {last_out[0] if last_out else ''}"
+        if expected_usdc_delta > 0 and cur >= pre + int(expected_usdc_delta * 0.9):
+            return f"ok (usdc {pre} -> {cur}) -> {last_out[0] if last_out else ''}"
+        if ambiguous and cur != pre:
+            return f"ok (usdc {pre} -> {cur}) -> {last_out[0] if last_out else ''}"
+        if expected_usdc_delta == 0:
+            return f"ok -> {last_out[0] if last_out else ''}"
+        if attempt < 3:
+            time.sleep(6)  # let the RPC indexer catch up with the confirmed tx
+    return (f"ok (usdc delta unverified: {pre} -> {cur}) "
+            f"-> {last_out[0] if last_out else ''}")
+
+
+def _run_sheldon_reentry() -> Tuple[str, str]:
+    try:
+        proc = subprocess.run(
+            SHELDON_CYCLE_CMD, capture_output=True, text=True, timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        return "FAILED (timeout after 300s)", ""
+    except Exception as exc:
+        return f"FAILED ({exc})", ""
+    tail = (proc.stdout or "").strip().splitlines()[-1:] or ["no output"]
+    if proc.returncode != 0:
+        err_tail = (proc.stderr or "").strip().splitlines()[-1:] or [""]
+        return f"FAILED exit={proc.returncode}: {err_tail[0][:160]}", proc.stdout or ""
+    return f"ok: {tail[0][:160]}", proc.stdout or ""
+
+
+def _run_dispatcher_followup(depth: int) -> str:
+    """Process the signals Sheldon just wrote (open, or another prep swap)."""
+    env = {**os.environ, "GEORGE_CAPITAL_DEPTH": str(depth + 1)}
+    try:
+        proc = subprocess.run(
+            ["python3", str(Path(__file__).resolve()), "--once"],
+            capture_output=True, text=True, timeout=600, env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return "FAILED (timeout after 600s)"
+    except Exception as exc:
+        return f"FAILED ({exc})"
+    lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
+    tail = lines[-1][:200] if lines else "no output"
+    if proc.returncode != 0:
+        return f"FAILED exit={proc.returncode}: {tail}"
+    return f"ok: {tail}"
+
+
+def _trigger_capital_refresh(cfg: Dict[str, Any], signal_id: str = "",
+                             expected_usdc_delta: int = 0,
+                             ambiguous: bool = False) -> None:
+    """After a successful swap: refresh Missy's wallet scan, re-run
+    Sheldon's cycle, and process whatever signals it wrote (the open, or
+    another prep swap). This closes the capital-prep loop inside one
+    dispatcher invocation.
+
+    Failures here never undo the swap; they only cost latency (the hourly
+    pipeline re-runs Sheldon anyway).
+    """
+    if os.environ.get("GEORGE_SKIP_CAPITAL_REFRESH"):
+        print(f"[{utc_now()}] capital refresh skipped (GEORGE_SKIP_CAPITAL_REFRESH set)")
+        return
+    if KILL_FILE.exists():
+        print(f"[{utc_now()}] capital refresh skipped (KILL file present)")
+        return
+    depth = int(os.environ.get("GEORGE_CAPITAL_DEPTH") or 0)
+    if depth >= MAX_CAPITAL_CHAIN_DEPTH:
+        _notify_owner(
+            f"CAPITAL CHAIN DEPTH LIMIT signal={signal_id}: depth {depth} >= "
+            f"{MAX_CAPITAL_CHAIN_DEPTH}; remaining legs left to the next cycle"
+        )
+        return
+
+    now = time.time()
+    state = _load_reentry_state()
+    allowed, reason = _reentry_allowed(state, now)
+    if not allowed:
+        _notify_owner(f"CAPITAL REFRESH SKIPPED signal={signal_id}: {reason}")
+        return
+    state["timestamps"] = _reentry_window(state, now) + [now]
+    _save_reentry_state(state)
+
+    print(f"[{utc_now()}] capital refresh for {signal_id} (depth {depth}): wallet rescan...")
+    wallet_result = _run_wallet_refresh(cfg, expected_usdc_delta, ambiguous)
+    print(f"[{utc_now()}] wallet rescan: {wallet_result}")
+
+    print(f"[{utc_now()}] capital refresh: Sheldon re-entry...")
+    sheldon_result, sheldon_stdout = _run_sheldon_reentry()
+    print(f"[{utc_now()}] Sheldon re-entry: {sheldon_result}")
+
+    followup_result = "skipped (no new signals)"
+    if "WAKE_GEORGE:" in sheldon_stdout:
+        print(f"[{utc_now()}] capital refresh: dispatcher follow-up...")
+        followup_result = _run_dispatcher_followup(depth)
+        print(f"[{utc_now()}] dispatcher follow-up: {followup_result}")
+
+    _notify_owner(
+        f"CAPITAL REFRESH signal={signal_id}: wallet rescan {wallet_result}; "
+        f"Sheldon {sheldon_result}; follow-up {followup_result}"
+    )
 
 
 def _iter_pending() -> List[Path]:
@@ -193,6 +423,9 @@ def _handle_auto(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, A
     sim = details.get("simulation")
     if not _sim_ok(sim):
         return "rejected", {"stage": "simulate", "error": "simulation failed", "simulation": sim}
+    # Capital refresh runs at the run_once epilogue (after the dispatcher
+    # lock releases), never inline: an inline follow-up would race this
+    # process's own pending loop.
     return _do_send(signal, cfg, rails)
 
 
@@ -218,22 +451,70 @@ def _handle_confirm_each(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dic
     }
 
 
-def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> None:
-    if KILL_FILE.exists():
-        print(f"[{utc_now()}] KILL file present; halting.")
-        return
+def _expected_usdc_delta(executed: List[Dict[str, Any]]) -> Tuple[int, bool]:
+    """Net USDC raw-balance change the executed swaps should produce.
 
-    pending = _iter_pending()
-    if not pending:
-        print(f"[{utc_now()}] No pending signals.")
-        return
+    Buys (USDC in) are exact; sells (USDC out) are route-dependent, so any
+    sell marks the expectation ambiguous and the refresh accepts any change.
+    """
+    total = 0
+    ambiguous = False
+    for sig in executed:
+        if sig.get("action") != "swap":
+            continue
+        try:
+            amt = int(sig.get("amount") or 0)
+        except (TypeError, ValueError):
+            continue
+        if sig.get("input_mint") == USDC_MINT:
+            total -= amt
+        elif sig.get("output_mint") == USDC_MINT:
+            ambiguous = True
+    return total, ambiguous
 
-    print(f"[{utc_now()}] Processing {len(pending)} signal(s)...")
-    for signal_path in pending:
-        status, details = process_signal_path(signal_path, cfg, rails)
-        print(f"  {signal_path.name} -> {status}: {details.get('error') or details.get('notes', '')}")
-        if status in {"rejected", "failed", "awaiting_approval", "dry_run", "executed", "queued_for_review"}:
-            _move_to_processed(signal_path)
+
+def _capital_epilogue(cfg: Dict[str, Any], executed: List[Dict[str, Any]]) -> None:
+    """After run_once releases the dispatcher lock: if a swap executed,
+    run the wallet rescan -> Sheldon re-entry -> follow-up chain."""
+    swaps = [s for s in executed if s.get("action") == "swap"]
+    if not swaps:
+        return
+    expected, ambiguous = _expected_usdc_delta(swaps)
+    ids = ",".join(str(s.get("signal_id")) for s in swaps)
+    _trigger_capital_refresh(cfg, ids, expected, ambiguous)
+
+
+def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Process all pending signals once under the dispatcher lock. Returns
+    the signals that were executed on-chain (the caller decides on any
+    capital-refresh chain)."""
+    executed: List[Dict[str, Any]] = []
+    with _dispatcher_lock():
+        if KILL_FILE.exists():
+            print(f"[{utc_now()}] KILL file present; halting.")
+            return executed
+
+        pending = _iter_pending()
+        if not pending:
+            print(f"[{utc_now()}] No pending signals.")
+            return executed
+
+        print(f"[{utc_now()}] Processing {len(pending)} signal(s)...")
+        for signal_path in pending:
+            status, details = process_signal_path(signal_path, cfg, rails)
+            print(f"  {signal_path.name} -> {status}: {details.get('error') or details.get('notes', '')}")
+            if status in {"rejected", "failed", "awaiting_approval", "dry_run", "executed", "queued_for_review"}:
+                _move_to_processed(signal_path)
+            if status == "executed":
+                try:
+                    executed.append(load_json(_processed_path(signal_path)))
+                except Exception:
+                    executed.append({"signal_id": signal_path.stem})
+    return executed
+
+
+def _processed_path(signal_path: Path) -> Path:
+    return SIGNALS_DIR / "processed" / signal_path.name
 
 
 def process_signal_path(signal_path: Path, cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
@@ -291,6 +572,14 @@ def do_approve(signal_id: str, cfg: Dict[str, Any], rails: Dict[str, Any]) -> No
         details=details,
         rails_hash=rails_hash(RAILS_PATH),
     )
+    if decision == "executed" and action == "swap":
+        try:
+            amt = int(signal.get("amount") or 0)
+        except (TypeError, ValueError):
+            amt = 0
+        expected = -amt if signal.get("input_mint") == USDC_MINT else 0
+        ambiguous = signal.get("output_mint") == USDC_MINT
+        _trigger_capital_refresh(cfg, signal_id, expected, ambiguous)
     print(f"{signal_id} -> {decision}: {details}")
     if decision == "executed":
         approvals_store.move_to(signal_id, approvals_store.APPROVED_DIR)
@@ -384,11 +673,11 @@ def main() -> None:
         return
 
     if args.once:
-        run_once(cfg, rails)
+        _capital_epilogue(cfg, run_once(cfg, rails))
         return
 
     while True:
-        run_once(cfg, rails)
+        _capital_epilogue(cfg, run_once(cfg, rails))
         time.sleep(cfg.get("heartbeat_interval_seconds", 60))
 
 

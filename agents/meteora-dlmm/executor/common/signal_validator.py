@@ -1,8 +1,12 @@
 """Shared signal validation for the multi-DEX executor."""
 
+import base64
+import json
+import sys
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from common.utils import load_json
 
@@ -13,9 +17,51 @@ SWAP_REQUIRED_FIELDS = {"input_mint", "output_mint", "amount"}
 SWAP_TO_USDC_REQUIRED_FIELDS = {"mint", "symbol", "decimals", "amount_raw", "amount_ui", "value_usd", "reason"}
 VALID_ACTIONS = {"open", "close", "claim_fees", "claim_rewards", "swap", "swap_to_usdc"}
 
+# Byte offset of the live current tick/bin (i32, little-endian, signed) in
+# each DEX's on-chain pool account. Meteora and Orca verified against live
+# mainnet accounts; Raydium derived from the zero-copy POD layout and must
+# be treated as best-effort.
+_TICK_DECODE_OFFSETS = {
+    "meteora": 76,   # LbPair.activeId
+    "orca": 81,      # Whirlpool.tickCurrentIndex
+    "raydium": 304,  # PoolState.tickCurrent
+}
+
 
 class SignalValidationError(Exception):
     pass
+
+
+def fetch_pool_current_tick(dex: str, pool_address: str, rpc_url: str,
+                            timeout: float = 10.0) -> Optional[int]:
+    """Return the pool's live current tick/bin, or None when unavailable."""
+    offset = _TICK_DECODE_OFFSETS.get((dex or "").lower())
+    if not offset or not pool_address or not rpc_url:
+        return None
+    try:
+        payload = {
+            "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+            "params": [pool_address,
+                       {"encoding": "base64", "commitment": "confirmed"}],
+        }
+        req = urllib.request.Request(
+            rpc_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        value = (result or {}).get("result", {}).get("value") or {}
+        data = value.get("data")
+        raw = data[0] if isinstance(data, list) and data else data
+        if not isinstance(raw, str):
+            return None
+        blob = base64.b64decode(raw)
+        if len(blob) < offset + 4:
+            return None
+        return int.from_bytes(blob[offset : offset + 4], "little", signed=True)
+    except Exception:
+        return None
 
 
 def _check_swap(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> None:
@@ -133,6 +179,26 @@ def validate_core(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, 
             raise SignalValidationError(f"bin_range values must be integers: {exc}") from exc
         if lower > upper:
             raise SignalValidationError(f"bin_range.lower ({lower}) > upper ({upper})")
+
+        # Live-price guard: an open range that does not contain the pool's
+        # current tick/bin opens one-sided at a stale price (the ZEC/USDC
+        # center=0 bug). Only enforced when the tick can be fetched; a
+        # fetch failure warns instead of blocking execution.
+        tick = fetch_pool_current_tick(
+            dex, signal.get("pool_address"), cfg.get("rpc_https_url")
+        )
+        if tick is None:
+            print(
+                f"[validator] WARN: current tick unavailable for open "
+                f"{signal.get('signal_id')} (dex={dex}); tick guard skipped",
+                file=sys.stderr,
+            )
+        elif not (lower <= tick <= upper):
+            raise SignalValidationError(
+                f"open range [{lower}, {upper}] does not contain pool current "
+                f"tick {tick} (dex={dex}); refusing to open a range off the "
+                "live price"
+            )
 
     if action in {"close", "claim_fees", "claim_rewards"} and not signal.get("position_id"):
         raise SignalValidationError(f"{action} requires position_id")

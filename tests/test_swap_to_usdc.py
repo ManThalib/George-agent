@@ -10,8 +10,10 @@ from pathlib import Path
 _EXECUTOR_DIR = Path(__file__).resolve().parent.parent / "agents" / "meteora-dlmm" / "executor"
 sys.path.insert(0, str(_EXECUTOR_DIR))
 
-import dust_queue
-import signal_validator
+import common.dust_queue as dust_queue
+import common.signal_validator as signal_validator
+from dexes.meteora import validator as meteora_validator
+from dexes.raydium import validator as raydium_validator
 
 
 def _now_iso() -> str:
@@ -76,7 +78,7 @@ class TestSwapToUsdc(unittest.TestCase):
         cfg = {"signal_max_age_seconds": 300}
         rails = {"max_bin_range_width": 2000}
 
-        validated = signal_validator.validate_dict(signal, cfg, rails)
+        validated = signal_validator.validate_core(signal, cfg, rails)
         self.assertEqual(validated["action"], "swap_to_usdc")
         self.assertEqual(validated["symbol"], "dust")
 
@@ -109,7 +111,7 @@ class TestSwapToUsdc(unittest.TestCase):
         for name, signal in missing_cases.items():
             with self.subTest(name=name):
                 with self.assertRaises(signal_validator.SignalValidationError):
-                    signal_validator.validate_dict(signal, cfg, rails)
+                    signal_validator.validate_core(signal, cfg, rails)
 
     def test_range_width_guardrail_respects_new_maximum(self):
         """Range width must not exceed the rail (2000 by default)."""
@@ -117,11 +119,11 @@ class TestSwapToUsdc(unittest.TestCase):
         rails = {"max_bin_range_width": 2000}
 
         # Exactly at the new cap should pass.
-        signal_validator.validate_dict(_valid_open(width=2000), cfg, rails)
+        raydium_validator.validate(_valid_open(dex="raydium", width=2000), cfg, rails)
 
         # One bin over should fail.
         with self.assertRaises(signal_validator.SignalValidationError) as ctx:
-            signal_validator.validate_dict(_valid_open(width=2001), cfg, rails)
+            raydium_validator.validate(_valid_open(dex="raydium", width=2001), cfg, rails)
         self.assertIn("exceeds rail", str(ctx.exception))
 
     def test_dex_specific_range_width(self):
@@ -134,13 +136,13 @@ class TestSwapToUsdc(unittest.TestCase):
 
         # Raydium width 600 exceeds its DEX-specific cap.
         with self.assertRaises(signal_validator.SignalValidationError) as ctx:
-            signal_validator.validate_dict(_valid_open(dex="raydium", width=600), cfg, rails)
+            raydium_validator.validate(_valid_open(dex="raydium", width=600), cfg, rails)
         self.assertIn("raydium range width 600 (inclusive) exceeds rail 500", str(ctx.exception))
 
         # Meteora is capped at 70 bins by default.
-        signal_validator.validate_dict(_valid_open(dex="meteora", width=70), cfg, rails)
+        meteora_validator.validate(_valid_open(dex="meteora", width=70), cfg, rails)
         with self.assertRaises(signal_validator.SignalValidationError) as ctx:
-            signal_validator.validate_dict(_valid_open(dex="meteora", width=71), cfg, rails)
+            meteora_validator.validate(_valid_open(dex="meteora", width=71), cfg, rails)
         self.assertIn("meteora range width 71 (inclusive) exceeds rail 70", str(ctx.exception))
 
 
