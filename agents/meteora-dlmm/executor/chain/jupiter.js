@@ -1,20 +1,12 @@
 /**
  * Jupiter swap handler.
- *
- * Executes a single token swap routed by Jupiter. This handler performs no
- * trading decisions of its own: it receives a fully specified swap from the
- * analyst signal (input mint, output mint, amount) and executes it.
- *
- * Endpoints (Jupiter Swap API v1, lite host — no API key required):
- *   GET  /swap/v1/quote  -> route + expected amounts
- *   POST /swap/v1/swap   -> unsigned transaction for the quoted route
  */
 
 import { VersionedTransaction } from "@solana/web3.js";
 import { simulate, signAndSend, txToBase64 } from "./tx.js";
 
 const JUPITER_BASE = "https://lite-api.jup.ag/swap/v1";
-const MAX_PRIORITY_LAMPORTS = 500000; // hard cap; rails also cap the fee
+const MAX_PRIORITY_LAMPORTS = 500000;
 
 function assertMint(value, field) {
   if (!value || typeof value !== "string" || value.length < 32) {
@@ -59,13 +51,10 @@ export async function swap(req, connection, wallet) {
   });
 
   const quote = await fetchJson(`${JUPITER_BASE}/quote?${quoteParams.toString()}`);
-
   const priceImpactPct = Math.abs(Number(quote.priceImpactPct ?? 0)) * 100;
   const maxImpactPct = Number(req.max_price_impact_pct ?? 1.5);
   if (priceImpactPct > maxImpactPct) {
-    throw new Error(
-      `price impact ${priceImpactPct.toFixed(4)}% exceeds rail max_price_impact_pct ${maxImpactPct}%`
-    );
+    throw new Error(`price impact ${priceImpactPct.toFixed(4)}% exceeds rail max_price_impact_pct ${maxImpactPct}%`);
   }
 
   const swapBody = {

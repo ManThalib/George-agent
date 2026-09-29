@@ -4,7 +4,7 @@ import json
 from datetime import date
 from pathlib import Path
 
-from common import utc_now
+from common.utils import utc_now
 
 
 JOURNAL_DIR = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/journal")

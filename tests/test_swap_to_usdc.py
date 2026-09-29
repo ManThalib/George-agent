@@ -35,13 +35,15 @@ def _valid_swap_to_usdc(**overrides) -> dict:
     return signal
 
 
-def _valid_open(action: str = "open", dex: str = "meteora", width: int = 2000) -> dict:
+def _valid_open(action: str = "open", dex: str = "raydium", width: int = 2000) -> dict:
+    # Use inclusive bin count: upper = lower + width - 1, so a width of 2000
+    # spans exactly 2000 bins/ticks and is at the rail cap.
     return {
         "signal_id": f"test-{action}-{dex}-{width}",
         "action": action,
         "dex": dex,
         "pool_address": "So1anaPoo1AddresS123456789012345678901234567890",
-        "bin_range": {"lower": 0, "upper": width},
+        "bin_range": {"lower": 0, "upper": width - 1},
         "liquidity": {"amount_x": "1000000", "amount_y": "500000"},
         "max_slippage_bps": 50,
         "reason": "test range width",
@@ -133,10 +135,13 @@ class TestSwapToUsdc(unittest.TestCase):
         # Raydium width 600 exceeds its DEX-specific cap.
         with self.assertRaises(signal_validator.SignalValidationError) as ctx:
             signal_validator.validate_dict(_valid_open(dex="raydium", width=600), cfg, rails)
-        self.assertIn("raydium range width 600 exceeds rail 500", str(ctx.exception))
+        self.assertIn("raydium range width 600 (inclusive) exceeds rail 500", str(ctx.exception))
 
-        # Meteora still uses the shared 2000 cap.
-        signal_validator.validate_dict(_valid_open(dex="meteora", width=2000), cfg, rails)
+        # Meteora is capped at 70 bins by default.
+        signal_validator.validate_dict(_valid_open(dex="meteora", width=70), cfg, rails)
+        with self.assertRaises(signal_validator.SignalValidationError) as ctx:
+            signal_validator.validate_dict(_valid_open(dex="meteora", width=71), cfg, rails)
+        self.assertIn("meteora range width 71 (inclusive) exceeds rail 70", str(ctx.exception))
 
 
 if __name__ == "__main__":

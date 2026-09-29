@@ -1,28 +1,23 @@
 /**
- * Orca Whirlpool handler.
+ * Orca Whirlpool chain handler.
  */
 
 import { PublicKey } from "@solana/web3.js";
 import { buildWhirlpoolClient, ORCA_WHIRLPOOL_PROGRAM_ID, WhirlpoolContext } from "@orca-so/whirlpools-sdk";
 import BN from "bn.js";
 import Decimal from "decimal.js";
-import { signAndSend, simulate, txToBase64 } from "./tx.js";
+import { signAndSend, simulate, txToBase64 } from "../../chain/tx.js";
 
 function walletStub(publicKey) {
   return {
     publicKey: new PublicKey(publicKey),
-    signTransaction: () => {
-      throw new Error("signTransaction not available during instruction build");
-    },
-    signAllTransactions: () => {
-      throw new Error("signAllTransactions not available during instruction build");
-    },
+    signTransaction: () => { throw new Error("signTransaction not available during instruction build"); },
+    signAllTransactions: () => { throw new Error("signAllTransactions not available during instruction build"); },
   };
 }
 
 function makeClient(connection, publicKey) {
   const wallet = walletStub(publicKey);
-  // Signature: from(connection, wallet, fetcher?, lookupTableFetcher?, opts?, programId?)
   const ctx = WhirlpoolContext.from(connection, wallet, undefined, undefined, undefined, ORCA_WHIRLPOOL_PROGRAM_ID);
   return buildWhirlpoolClient(ctx);
 }
@@ -62,18 +57,18 @@ export async function openPosition(req, connection, wallet) {
   if (tickLower >= tickUpper) throw new Error(`orca open invalid bin_range: ${tickLower} >= ${tickUpper}`);
 
   const input = liquidityInputForOpen(pool, slippageBps, amount_x, amount_y);
+  const { positionMint, tx: builder } = await pool.openPosition(tickLower, tickUpper, input, wallet.publicKey);
 
-  const { positionMint, tx: builder } = await pool.openPosition(
-    tickLower,
-    tickUpper,
-    input,
-    wallet.publicKey
-  );
+  const positionMintB58 = positionMint.toBase58();
+  const positionPda = PublicKey.findProgramAddressSync(
+    [Buffer.from("position"), positionMint.toBuffer()],
+    ORCA_WHIRLPOOL_PROGRAM_ID
+  )[0];
 
   const { tx, signers } = await buildPayload(builder);
   if (req.mode === "simulate") {
     const sim = await simulate(connection, tx);
-    return { tx_base64: [txToBase64(tx)], simulation: sim, notes: `positionMint=${positionMint.toBase58()}` };
+    return { tx_base64: [txToBase64(tx)], simulation: sim, notes: `positionMint=${positionMintB58} pda=${positionPda.toBase58()}` };
   }
 
   const { signature, slot, confirmed_via, fallback_broadcast } = await signAndSend(connection, tx, wallet, signers);
@@ -82,8 +77,8 @@ export async function openPosition(req, connection, wallet) {
     slot,
     confirmed_via,
     ...(fallback_broadcast ? { fallback_broadcast } : {}),
-    position_id: positionMint.toBase58(),
-    notes: `positionMint=${positionMint.toBase58()}`,
+    position_id: positionPda.toBase58(),
+    notes: `positionMint=${positionMintB58} pda=${positionPda.toBase58()}`,
   };
 }
 
@@ -92,8 +87,7 @@ export async function closePosition(req, connection, wallet) {
   const positionId = req.position_id;
   if (!positionId) throw new Error("position_id required for orca close");
   const slippageBps = req.max_slippage_bps ?? 100;
-  // Orca Percentage type: { numerator: bigint, denominator: bigint }
-  const slippage = { numerator: BigInt(slippageBps), denominator: BigInt(10000) };
+  const slippage = { numerator: new BN(slippageBps), denominator: new BN(10000) };
 
   const client = makeClient(connection, wallet.publicKey);
   const pool = await client.getPool(new PublicKey(poolAddress));
@@ -106,14 +100,11 @@ export async function closePosition(req, connection, wallet) {
   }
 
   const signatures = [];
-  const confirmations = [];
   for (const p of payloads) {
     const sent = await signAndSend(connection, p.tx, wallet, p.signers);
-    const { signature, confirmed_via, fallback_broadcast } = sent;
-    signatures.push(signature);
-    confirmations.push({ signature, confirmed_via, ...(fallback_broadcast ? { fallback_broadcast } : {}) });
+    signatures.push(sent);
   }
-  return { signatures, confirmations };
+  return { signatures };
 }
 
 export async function claimFees(req, connection, wallet) {

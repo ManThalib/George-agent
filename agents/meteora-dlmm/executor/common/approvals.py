@@ -1,9 +1,4 @@
-"""Pending approval store for confirm_each mode.
-
-When a signal is validated in confirm_each mode, an approval request is stored
-in approvals/pending/<signal_id>.json. The owner must explicitly approve or
-reject it. On approval the transaction is rebuilt fresh and sent.
-"""
+"""Pending approval store for confirm_each mode."""
 
 import json
 import shutil

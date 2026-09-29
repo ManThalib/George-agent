@@ -1,15 +1,10 @@
 {
-  "name": "dlmm-executor-chain",
-  "version": "0.1.0",
+  "name": "dlmm-executor",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Chain layer for the multi-DEX executor: builds, simulates, signs and sends Meteora DLMM / Raydium CLMM / Orca Whirlpool transactions. Speaks JSON on stdin/stdout.",
-  "bin": {
-    "dex": "./dex.js"
-  },
-  "scripts": {
-    "selftest": "node dex.js selftest"
-  },
+  "description": "Multi-DEX executor chain layer: builds, simulates, signs and sends Meteora DLMM / Raydium CLMM / Orca Whirlpool transactions. Speaks JSON on stdin/stdout.",
+  "scripts": {},
   "dependencies": {
     "@coral-xyz/anchor": "0.32.1",
     "@meteora-ag/dlmm": "1.9.14",

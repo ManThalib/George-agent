@@ -1,21 +1,12 @@
-"""Pending review queue for dust swap_to_usdc signals.
-
-Sheldon's scoring agent emits `swap_to_usdc` signals for non-SOL/non-USDC
-assets that should be converted to USDC. George never executes these
-automatically; they land in this file-based queue with status
-`pending_review` until a human approves or rejects them.
-"""
+"""Pending review queue for dust swap_to_usdc signals."""
 
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from common import load_json, write_json
+from common.utils import load_json, write_json
 
 
-# Data directory for the dust-swap review queue.  Kept separate from the
-# incoming signal directory so upstream files can be moved to processed/ while
-# the review record lives on.
 DATA_DIR = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/data/dust_swaps")
 PENDING_DIR = DATA_DIR / "pending"
 REVIEWED_DIR = DATA_DIR / "reviewed"
@@ -50,7 +41,7 @@ def get(signal_id: str) -> Optional[Dict[str, Any]]:
     for dir_ in (PENDING_DIR, REVIEWED_DIR):
         path = dir_ / f"{signal_id}.json"
         if path.exists():
-            return load_json(path)  # type: ignore[return-value]
+            return load_json(path)
     return None
 
 
@@ -60,7 +51,7 @@ def list_pending() -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     for path in sorted(PENDING_DIR.glob("*.json")):
         try:
-            records.append(load_json(path))  # type: ignore[arg-type]
+            records.append(load_json(path))
         except Exception:
             continue
     return records

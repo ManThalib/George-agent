@@ -63,7 +63,8 @@ Auto-pause means: **no new opens**, closes still allowed (de-risking is always p
 | `min_pool_liquidity_usd` | **250000** | Refuse thin pools. |
 | `min_24h_volume_usd` | **1000000** | Refuse dead pools. |
 | `allowed_bin_steps` | **[10, 20, 25, 50, 100]** | Bin step whitelist (spacing). |
-| `max_bin_range_width` | **2000** | Max bins/ticks between position lower/upper bounds. Supports Sheldon adaptive half-width up to 1000 bins per side (2000 total). |
+| `max_bin_range_width` | **2000** | Max inclusive bins/ticks for a position (upper - lower + 1). Supports Sheldon adaptive half-width up to 1000 bins per side (2000 total). |
+| `max_meteora_range_width` | **70** | Meteora `initializePositionAndAddLiquidityByStrategy` can only create ~70 bins in one transaction; this rail overrides `max_bin_range_width` for Meteora. |
 | `reject_active_bin_out_of_range_open` | **true** | Don't open if price already outside the requested range. |
 
 **CLOSE actions bypass this section** — closing is de-risking and is always allowed (subject to mode + kill switch).

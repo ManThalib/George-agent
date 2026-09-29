@@ -1,11 +1,11 @@
 /**
- * Raydium CLMM handler.
+ * Raydium CLMM chain handler.
  */
 
 import { PublicKey } from "@solana/web3.js";
 import { Raydium, TxVersion, CLMM_PROGRAM_ID, PersonalPositionLayout } from "@raydium-io/raydium-sdk-v2";
 import BN from "bn.js";
-import { signAndSend, simulate, txToBase64 } from "./tx.js";
+import { signAndSend, simulate, txToBase64 } from "../../chain/tx.js";
 
 let raydiumCache = null;
 
@@ -63,11 +63,7 @@ export async function openPosition(req, connection, wallet) {
   const tx = res.transaction;
   if (req.mode === "simulate") {
     const sim = await simulate(connection, tx);
-    return {
-      tx_base64: [txToBase64(tx)],
-      simulation: sim,
-      notes: `extInfo=${JSON.stringify(Object.keys(res.extInfo))}`,
-    };
+    return { tx_base64: [txToBase64(tx)], simulation: sim, notes: `extInfo=${JSON.stringify(Object.keys(res.extInfo))}` };
   }
 
   const { signature, slot, confirmed_via, fallback_broadcast } = await signAndSend(connection, tx, wallet, res.signers);
@@ -87,7 +83,6 @@ export async function closePosition(req, connection, wallet) {
 
   const raydium = await getRaydium(connection, wallet.publicKey);
   const { poolInfo, poolKeys } = await raydium.clmm.getPoolInfoFromRpc(poolAddress);
-
   const ownerPosition = await fetchPositionAccount(connection, positionId);
 
   const res = await raydium.clmm.closePosition({
@@ -121,7 +116,6 @@ export async function claimFees(req, connection, wallet) {
     txVersion: TxVersion.LEGACY,
   });
 
-  // harvestAllRewards returns multiple transactions
   const txs = res.transactions;
   if (req.mode === "simulate") {
     const sims = await Promise.all(txs.map((tx) => simulate(connection, tx)));
@@ -129,12 +123,9 @@ export async function claimFees(req, connection, wallet) {
   }
 
   const signatures = [];
-  const confirmations = [];
   for (const tx of txs) {
     const sent = await signAndSend(connection, tx, wallet);
-    const { signature, confirmed_via, fallback_broadcast } = sent;
-    signatures.push(signature);
-    confirmations.push({ signature, confirmed_via, ...(fallback_broadcast ? { fallback_broadcast } : {}) });
+    signatures.push(sent);
   }
-  return { signatures, confirmations };
+  return { signatures };
 }

@@ -3,18 +3,12 @@
  *
  * Protocol: one JSON request object on stdin, one JSON response object on stdout.
  * ALL diagnostics go to stderr so stdout stays parseable.
- *
- * The private key is read from the SOLANA_AGENT_WALLET environment variable and
- * is never logged, echoed, or included in any response.
  */
 
 import process from "node:process";
+import { Keypair, PublicKey } from "@solana/web3.js";
+import bs58 from "bs58";
 
-/* ------------------------------------------------------------------ *
- * Output discipline
- * ------------------------------------------------------------------ */
-
-// SDKs occasionally console.log(); that would corrupt our JSON on stdout.
 const stderrLog = (...args) => process.stderr.write(args.map(String).join(" ") + "\n");
 for (const fn of ["log", "info", "debug", "warn", "trace"]) {
   console[fn] = stderrLog;
@@ -37,10 +31,6 @@ export function log(...args) {
   stderrLog("[chain]", ...args);
 }
 
-/* ------------------------------------------------------------------ *
- * stdin
- * ------------------------------------------------------------------ */
-
 export async function readRequest() {
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
@@ -49,9 +39,35 @@ export async function readRequest() {
   return JSON.parse(raw);
 }
 
-/* ------------------------------------------------------------------ *
- * CLI flags
- * ------------------------------------------------------------------ */
+export function loadKeypair() {
+  const raw = process.env.SOLANA_AGENT_WALLET?.trim();
+  if (!raw) throw new Error("SOLANA_AGENT_WALLET not set");
+
+  let bytes;
+  if (raw.startsWith("[") && raw.endsWith("]")) {
+    bytes = new Uint8Array(JSON.parse(raw));
+  } else {
+    try {
+      bytes = bs58.decode(raw);
+    } catch (err) {
+      if (raw.startsWith("oc-")) {
+        throw new Error(`SOLANA_AGENT_WALLET is an OpenClaw secret sentinel; re-connect the secret in Agent Settings (${err.message})`);
+      }
+      throw new Error(`SOLANA_AGENT_WALLET is not a valid base58 keypair: ${err.message}`);
+    }
+  }
+
+  if (bytes.length === 64) {
+    return Keypair.fromSecretKey(bytes);
+  } else if (bytes.length === 32) {
+    return Keypair.fromSeed(bytes);
+  }
+  throw new Error(`keypair material unexpected length ${bytes.length}; expected 32 or 64 bytes`);
+}
+
+export function publicKeyWallet(publicKey) {
+  return { publicKey: new PublicKey(publicKey) };
+}
 
 export function parseFlags(argv) {
   const flags = { _: [] };
@@ -73,16 +89,10 @@ export function parseFlags(argv) {
   return flags;
 }
 
-/* ------------------------------------------------------------------ *
- * Amount helpers
- * ------------------------------------------------------------------ */
-
-/** Accept a raw integer string, a number, or a decimal UI amount + decimals. */
 export function toRawAmount(value, decimals) {
   if (value === undefined || value === null || value === "") return 0n;
   if (typeof value === "string" && /^[0-9]+$/.test(value)) return BigInt(value);
   if (typeof value === "number" && Number.isInteger(value)) return BigInt(value);
-  // Decimal UI amount -> raw, truncated (never rounds up: we never overspend).
   const s = String(value);
   if (!/^-?\d+(\.\d+)?$/.test(s)) throw new Error(`invalid amount: ${s}`);
   const neg = s.startsWith("-");
@@ -91,10 +101,6 @@ export function toRawAmount(value, decimals) {
   const raw = BigInt(intPart + padded);
   return neg ? -raw : raw;
 }
-
-/* ------------------------------------------------------------------ *
- * Response shape
- * ------------------------------------------------------------------ */
 
 export function okResponse(base, extra = {}) {
   return { ok: true, ...base, ...extra };

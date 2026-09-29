@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""George multi-DEX executor loop.
+"""George multi-DEX executor dispatcher.
 
-Reads signals from signals/pending/, validates them, dispatches to the correct
-handler, and moves each handled signal to signals/processed/.
+Reads signals from signals/pending/, validates them per DEX, dispatches via the
+chain dispatcher, and moves each handled signal to signals/processed/.
 
 Modes:
     dry_run     simulate every transaction, never sign
@@ -10,12 +10,12 @@ Modes:
     auto        simulate, then sign and send automatically if all rails pass
 
 Usage:
-    python3 executor.py [--once]
-    python3 executor.py --approve <signal_id>
-    python3 executor.py --reject <signal_id>
-    python3 executor.py --list-approvals
-    python3 executor.py --list-dust-swaps
-    python3 executor.py --check
+    python3 dispatcher.py [--once]
+    python3 dispatcher.py --approve <signal_id>
+    python3 dispatcher.py --reject <signal_id>
+    python3 dispatcher.py --list-approvals
+    python3 dispatcher.py --list-dust-swaps
+    python3 dispatcher.py --check
 """
 
 import argparse
@@ -27,14 +27,14 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from common import utc_now
-from config_loader import ConfigError, load_config
-from journal import append as journal_append
-from rails_loader import load_rails
-from signal_validator import SignalValidationError, validate, validate_dict
-import tx_builder
-import approvals as approvals_store
-import dust_queue
+from common.utils import utc_now, load_json, rails_hash
+from common.config_loader import ConfigError, load_config
+from common.journal import append as journal_append
+from common.rails_loader import RAILS_PATH, load_rails
+from common.signal_validator import SignalValidationError, validate_core
+from common.chain_client import ChainError, simulate as chain_simulate, send as chain_send
+import common.approvals as approvals_store
+import common.dust_queue as dust_queue
 
 
 SIGNALS_DIR = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/signals")
@@ -58,70 +58,132 @@ def _move_to_processed(signal_path: Path) -> Path:
 
 
 def _notify_owner(text: str) -> None:
-    # The executor itself does not know the channel; the calling agent reads
-    # journal or stdout. Print a clear line so it can be picked up.
     print(f"[OWNER_NOTIFICATION] {text}")
 
 
-def _summarise_simulation(sim: Dict[str, Any]) -> str:
+def _summarise_simulation(sim: Any) -> str:
     if isinstance(sim, list):
         return f"{len(sim)} tx(s); first ok={sim[0].get('ok') if sim else 'n/a'}"
     return f"ok={sim.get('ok')} err={sim.get('err')} units={sim.get('units_consumed')}"
 
 
-def _run_simulation(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    """Simulate a validated signal. Returns (decision, details)."""
-    try:
-        sim = tx_builder.simulate(signal, cfg, rails)
-    except Exception as exc:
-        return "failed", {"stage": "simulate", "error": str(exc), "traceback": traceback.format_exc()}
+def _get_dex_module(dex: str):
+    if dex == "meteora":
+        from dexes.meteora import validator as dex_validator  # noqa: F401
+        from dexes.meteora import builder as dex_builder
+        from dexes.meteora.validator import validate as dex_validate
+    elif dex == "orca":
+        from dexes.orca import validator as dex_validator  # noqa: F401
+        from dexes.orca import builder as dex_builder
+        from dexes.orca.validator import validate as dex_validate
+    elif dex == "raydium":
+        from dexes.raydium import validator as dex_validator  # noqa: F401
+        from dexes.raydium import builder as dex_builder
+        from dexes.raydium.validator import validate as dex_validate
+    else:
+        raise ValueError(f"unsupported dex: {dex}")
+    return dex_validate, dex_builder
 
-    sim_result = sim.get("simulation") or sim
-    notes = sim.get("notes", "")
-    tx_base64 = sim.get("tx_base64")
-    return "dry_run", {
-        "simulation": sim_result,
-        "tx_base64": tx_base64,
-        "notes": notes,
+
+def _build_swap_request(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "dex": "jupiter",
+        "action": "swap",
+        "mode": "send",
+        "rpc_url": cfg["rpc_https_url"],
+        "fallback_rpc_urls": cfg.get("rpc_fallback_urls", []),
+        "fallback_delay_seconds": cfg.get("rpc_fallback_delay_seconds", 15),
+        "wallet_public_key": cfg["wallet_public_key"],
+        "max_slippage_bps": min(int(signal.get("max_slippage_bps", rails.get("max_slippage_bps", 100))), int(rails.get("max_slippage_bps", 100))),
+        "priority_fee_cap_sol": rails.get("priority_fee_cap_sol", 0.0005),
+        "input_mint": signal["input_mint"],
+        "output_mint": signal["output_mint"],
+        "amount": signal["amount"],
+        "exact_out": signal.get("exact_out", False),
+        "max_price_impact_pct": rails.get("max_price_impact_pct", 1.5),
     }
 
 
-def process_signal(signal_path: Path, cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    """Validate a signal and act according to cfg mode."""
-    try:
-        signal = validate(signal_path, cfg, rails)
-    except SignalValidationError as exc:
-        return "rejected", {"error": str(exc), "signal_id": signal_path.stem}
+def _run_simulation(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    action = signal["action"]
+    if action == "swap":
+        req = _build_swap_request(signal, cfg, rails)
+    else:
+        dex = signal.get("dex") or "meteora"
+        dex_validate, dex_builder = _get_dex_module(dex)
+        signal = dex_validate(signal, cfg, rails)
+        req = dex_builder.build(signal, cfg, rails)
 
-    # swap_to_usdc signals are never executed automatically.  They are queued
-    # for manual review regardless of the configured mode.  This is the single
-    # place where the new Sheldon action is routed away from the send path.
-    if signal.get("action") == "swap_to_usdc":
-        return _queue_swap_to_usdc(signal, cfg, rails)
+    try:
+        sim = chain_simulate(req)
+    except ChainError as exc:
+        return "failed", {"stage": "simulate", "error": str(exc)}
+    except Exception as exc:
+        return "failed", {"stage": "simulate", "error": str(exc), "traceback": traceback.format_exc()}
+
+    return "dry_run", {
+        "simulation": sim.get("simulation"),
+        "tx_base64": sim.get("tx_base64"),
+        "notes": sim.get("notes", ""),
+    }
+
+
+def _do_send(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    action = signal["action"]
+    if action == "swap":
+        req = _build_swap_request(signal, cfg, rails)
+    else:
+        dex = signal.get("dex") or "meteora"
+        dex_validate, dex_builder = _get_dex_module(dex)
+        signal = dex_validate(signal, cfg, rails)
+        req = dex_builder.build(signal, cfg, rails)
+
+    try:
+        result = chain_send(req)
+    except Exception as exc:
+        return "failed", {"stage": "send", "error": str(exc), "traceback": traceback.format_exc()}
+
+    details: Dict[str, Any] = {"result": result}
+    for key in ("confirmed_via", "fallback_broadcast", "confirmations"):
+        if isinstance(result, dict) and result.get(key) is not None:
+            details[key] = result[key]
+    return "executed", details
+
+
+def _sim_ok(sim: Any) -> bool:
+    if isinstance(sim, list):
+        return all(s.get("ok") for s in sim)
+    return bool(sim and sim.get("ok"))
+
+
+def process_signal(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    action = signal.get("action")
+
+    if action == "swap_to_usdc":
+        path = dust_queue.queue(signal)
+        _notify_owner(
+            f"DUST SWAP QUEUED signal={signal['signal_id']} "
+            f"mint={signal.get('mint')} symbol={signal.get('symbol')} "
+            f"value_usd={signal.get('value_usd')}. "
+            f"Review: python3 executor/dispatcher.py --list-dust-swaps"
+        )
+        return "queued_for_review", {"queue_path": str(path), "notes": f"queued swap_to_usdc for review: {signal.get('reason', '')}"}
+
+    if action == "swap":
+        signal = validate_core(signal, cfg, rails)
+    else:
+        dex = signal.get("dex") or "meteora"
+        dex_validate, _ = _get_dex_module(dex)
+        signal = dex_validate(signal, cfg, rails)
 
     mode = cfg.get("mode", "dry_run")
     if mode == "auto":
         return _handle_auto(signal, cfg, rails)
     if mode == "confirm_each":
         return _handle_confirm_each(signal, cfg, rails)
-    # dry_run / anything else
+
     decision, details = _run_simulation(signal, cfg, rails)
     return decision, details
-
-
-def _queue_swap_to_usdc(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    """Queue a validated swap_to_usdc signal for manual review."""
-    path = dust_queue.queue(signal)
-    _notify_owner(
-        f"DUST SWAP QUEUED signal={signal['signal_id']} "
-        f"mint={signal.get('mint')} symbol={signal.get('symbol')} "
-        f"value_usd={signal.get('value_usd')}. "
-        f"Review: python3 executor/executor.py --list-dust-swaps"
-    )
-    return "queued_for_review", {
-        "queue_path": str(path),
-        "notes": f"queued swap_to_usdc for review: {signal.get('reason', '')}",
-    }
 
 
 def _handle_auto(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
@@ -147,36 +209,13 @@ def _handle_confirm_each(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dic
         f"APPROVAL REQUIRED signal={signal['signal_id']} "
         f"action={signal.get('action')} dex={signal.get('dex')} "
         f"pool={signal.get('pool_address')}. "
-        f"Run: python3 executor/executor.py --approve {signal['signal_id']}"
+        f"Run: python3 executor/dispatcher.py --approve {signal['signal_id']}"
     )
     return "awaiting_approval", {
         "simulation": sim,
         "tx_base64": details.get("tx_base64"),
         "notes": details.get("notes", ""),
     }
-
-
-def _sim_ok(sim: Any) -> bool:
-    if isinstance(sim, list):
-        return all(s.get("ok") for s in sim)
-    return bool(sim and sim.get("ok"))
-
-
-def _do_send(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    try:
-        result = tx_builder.send(signal, cfg, rails)
-    except Exception as exc:
-        return "failed", {"stage": "send", "error": str(exc), "traceback": traceback.format_exc()}
-
-    details: Dict[str, Any] = {"result": result}
-    # Confirmation provenance: how the send confirmed (primary-confirm vs
-    # fallback-read) and which endpoints the identical raw tx was re-broadcast
-    # to. Surfaced at the top level so journal entries show a silent
-    # Helius drop+rescue without digging into details.result.
-    for key in ("confirmed_via", "fallback_broadcast", "confirmations"):
-        if isinstance(result, dict) and result.get(key) is not None:
-            details[key] = result[key]
-    return "executed", details
 
 
 def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> None:
@@ -191,27 +230,35 @@ def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> None:
 
     print(f"[{utc_now()}] Processing {len(pending)} signal(s)...")
     for signal_path in pending:
-        status, details = process_signal(signal_path, cfg, rails)
-        signal_for_journal = None
-        try:
-            signal_for_journal = validate(signal_path, cfg, rails)
-        except Exception:
-            signal_for_journal = {"signal_id": signal_path.stem}
-        journal_append(
-            signal=signal_for_journal,
-            decision=status,
-            details=details,
-            rails_hash=rails_hash_from_path(),
-        )
+        status, details = process_signal_path(signal_path, cfg, rails)
         print(f"  {signal_path.name} -> {status}: {details.get('error') or details.get('notes', '')}")
         if status in {"rejected", "failed", "awaiting_approval", "dry_run", "executed", "queued_for_review"}:
             _move_to_processed(signal_path)
 
 
-def rails_hash_from_path() -> str:
-    from common import rails_hash as _rh
-    from rails_loader import RAILS_PATH
-    return _rh(RAILS_PATH)
+def process_signal_path(signal_path: Path, cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    try:
+        signal = load_json(signal_path)
+    except Exception as exc:
+        return "rejected", {"error": f"cannot read signal: {exc}"}
+
+    signal_id = signal.get("signal_id", signal_path.stem)
+    signal["signal_id"] = signal_id
+
+    try:
+        status, details = process_signal(signal, cfg, rails)
+    except SignalValidationError as exc:
+        status, details = "rejected", {"error": str(exc), "signal_id": signal_id}
+    except Exception as exc:
+        status, details = "failed", {"error": str(exc), "traceback": traceback.format_exc()}
+
+    journal_append(
+        signal=signal,
+        decision=status,
+        details=details,
+        rails_hash=rails_hash(RAILS_PATH),
+    )
+    return status, details
 
 
 def do_approve(signal_id: str, cfg: Dict[str, Any], rails: Dict[str, Any]) -> None:
@@ -220,14 +267,19 @@ def do_approve(signal_id: str, cfg: Dict[str, Any], rails: Dict[str, Any]) -> No
         print(f"No pending approval for {signal_id}")
         sys.exit(1)
     signal = record["signal"]
-    # Re-check kill switch
+
     if KILL_FILE.exists():
         print(f"[{utc_now()}] KILL file present; cannot approve {signal_id}.")
         sys.exit(1)
 
-    # Re-validate rails before sending.
+    action = signal.get("action")
     try:
-        signal = validate_dict(signal, cfg, rails)
+        if action == "swap":
+            signal = validate_core(signal, cfg, rails)
+        else:
+            dex = signal.get("dex") or "meteora"
+            dex_validate, _ = _get_dex_module(dex)
+            signal = dex_validate(signal, cfg, rails)
     except SignalValidationError as exc:
         print(f"Approval rejected: rails no longer pass: {exc}")
         sys.exit(1)
@@ -237,7 +289,7 @@ def do_approve(signal_id: str, cfg: Dict[str, Any], rails: Dict[str, Any]) -> No
         signal=signal,
         decision=decision,
         details=details,
-        rails_hash=rails_hash_from_path(),
+        rails_hash=rails_hash(RAILS_PATH),
     )
     print(f"{signal_id} -> {decision}: {details}")
     if decision == "executed":
@@ -256,7 +308,7 @@ def do_reject(signal_id: str, cfg: Dict[str, Any], rails: Dict[str, Any]) -> Non
         signal=record["signal"],
         decision="rejected_by_owner",
         details={"reason": "owner rejected approval"},
-        rails_hash=rails_hash_from_path(),
+        rails_hash=rails_hash(RAILS_PATH),
     )
     print(f"{signal_id} -> rejected by owner")
 
@@ -303,7 +355,7 @@ def do_check(cfg: Dict[str, Any]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="George multi-DEX executor")
+    parser = argparse.ArgumentParser(description="George multi-DEX executor dispatcher")
     parser.add_argument("--once", action="store_true", help="Run one cycle and exit")
     parser.add_argument("--approve", metavar="SIGNAL_ID", help="Approve and send a pending transaction")
     parser.add_argument("--reject", metavar="SIGNAL_ID", help="Reject a pending approval")

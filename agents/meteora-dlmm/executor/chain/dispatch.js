@@ -1,49 +1,21 @@
 #!/usr/bin/env node
 /**
- * dex.js — chain CLI entry point.
+ * Chain dispatch entry point.
  *
- * Subcommands (determined by request.action and request.mode):
- *   open, close, claim
- *
- * Reads a JSON request from stdin, dispatches to the correct DEX handler,
- * and emits a JSON response on stdout. All diagnostics go to stderr.
- *
- * Environment:
- *   SOLANA_AGENT_WALLET  -> base58 64-byte keypair (or 32-byte seed) used in send mode.
+ * Reads a JSON request from stdin, dispatches to the correct DEX handler in
+ * dexes/<dex>/chain.js, and emits a JSON response on stdout.
  */
 
 import process from "node:process";
-import { Connection, PublicKey, Keypair } from "@solana/web3.js";
-import { respond, respondError, readRequest, log } from "./common.js";
+import { Connection, PublicKey } from "@solana/web3.js";
+import { respond, respondError, readRequest, log, loadKeypair } from "./common.js";
 import { configureSendFallbacks } from "./tx.js";
-import * as meteora from "./meteora.js";
-import * as raydium from "./raydium.js";
-import * as orca from "./orca.js";
+import * as meteora from "../dexes/meteora/chain.js";
+import * as raydium from "../dexes/raydium/chain.js";
+import * as orca from "../dexes/orca/chain.js";
 import * as jupiter from "./jupiter.js";
-import bs58 from "bs58";
 
 const DEX_HANDLERS = { meteora, raydium, orca, jupiter };
-
-function loadKeypair() {
-  const raw = process.env.SOLANA_AGENT_WALLET?.trim();
-  if (!raw) throw new Error("SOLANA_AGENT_WALLET not set");
-
-  let bytes;
-  // JSON array of numbers
-  if (raw.startsWith("[") && raw.endsWith("]")) {
-    bytes = new Uint8Array(JSON.parse(raw));
-  } else {
-    // base58 encoded
-    bytes = bs58.decode(raw);
-  }
-
-  if (bytes.length === 64) {
-    return Keypair.fromSecretKey(bytes);
-  } else if (bytes.length === 32) {
-    return Keypair.fromSeed(bytes);
-  }
-  throw new Error(`keypair material unexpected length ${bytes.length}; expected 32 or 64 bytes`);
-}
 
 function validateRequest(req) {
   if (!req) throw new Error("missing request");
@@ -70,13 +42,7 @@ async function main() {
       wsEndpoint: req.rpc_ws_url || undefined,
     });
 
-    // Send-path fallback endpoints: if the primary accepts the tx but the
-    // cluster never sees it, confirmSignedTx re-broadcasts the identical raw
-    // tx to these and keeps confirming via the primary. URLs here must not
-    // carry API keys — key-bearing endpoints come via SOLANA_RPC_FALLBACK_URLS.
-    const fallbackUrls = Array.isArray(req.fallback_rpc_urls)
-      ? req.fallback_rpc_urls
-      : [];
+    const fallbackUrls = Array.isArray(req.fallback_rpc_urls) ? req.fallback_rpc_urls : [];
     const badFallbacks = fallbackUrls.filter((u) => typeof u !== "string" || !u.startsWith("https://"));
     if (badFallbacks.length) throw new Error(`fallback_rpc_urls must be https URLs, got: ${badFallbacks.join(", ")}`);
     configureSendFallbacks({
@@ -104,14 +70,6 @@ async function main() {
     else if (req.action === "swap") result = await jupiter.swap(req, connection, wallet);
 
     respond({ ok: true, dex: req.dex, action: req.action, mode: req.mode, ...result }, () => {
-      // Send mode: a losing confirmPromise in confirmSignedTx (rescue path —
-      // primary send threw, fallback broadcast succeeded — or a primary ws
-      // confirm that never settles) keeps its web3.js signature websocket
-      // subscription alive, so the node process never exits after printing
-      // its response (observed fallback-test-004, 2026-09-26: hung until
-      // killed at 110s). Exit once the response is flushed. Happy path is
-      // behavior-preserving: the confirmPromise already settled there and the
-      // process exits naturally anyway.
       if (req.mode === "send") process.exit(0);
     });
   } catch (err) {
