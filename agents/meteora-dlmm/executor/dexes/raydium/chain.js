@@ -54,6 +54,69 @@ async function fetchPositionAccount(connection, positionId) {
   }
 }
 
+function withinOnePct(got, want) {
+  if (want === 0n) return got === 0n;
+  const diff = got > want ? got - want : want - got;
+  return diff * 100n <= want;
+}
+
+async function verifyOpen(req, connection, wallet, nftMint, poolInfo) {
+  try {
+    const ownerPosition = await fetchPositionAccount(connection, nftMint);
+    const tickLower = Number(ownerPosition.tickLowerIndex);
+    const tickUpper = Number(ownerPosition.tickUpperIndex);
+    const expectedLower = Math.round(Number(req.bin_range?.lower ?? NaN));
+    const expectedUpper = Math.round(Number(req.bin_range?.upper ?? NaN));
+    const range_ok = tickLower === expectedLower && tickUpper === expectedUpper;
+    const liquidity = new BN(ownerPosition.liquidity.toString());
+    const { amount_x = "0", amount_y = "0" } = req.liquidity || {};
+    let amounts_ok = true;
+    let derived = {};
+    try {
+      const sqrtCurrent = TickUtil.getSqrtPriceAtTick(Number(poolInfo.tickCurrent));
+      const { amountA, amountB } = LiquidityMathUtil.getAmountsForLiquidity(
+        sqrtCurrent,
+        TickUtil.getSqrtPriceAtTick(tickLower),
+        TickUtil.getSqrtPriceAtTick(tickUpper),
+        liquidity,
+        true,
+      );
+      amounts_ok = withinOnePct(BigInt(amountA.toString()), BigInt(amount_x || "0"))
+        && withinOnePct(BigInt(amountB.toString()), BigInt(amount_y || "0"));
+      derived = { derived_a_raw: amountA.toString(), derived_b_raw: amountB.toString() };
+    } catch (err) {
+      // Amount derivation is a best-effort cross-check; a math failure
+      // must not mask the structural (position exists + range) verdict.
+      derived = { derived_error: err.message };
+    }
+    return {
+      ok: range_ok && amounts_ok,
+      position_found: true,
+      range_ok,
+      amounts_ok,
+      tick_lower_index: tickLower,
+      tick_upper_index: tickUpper,
+      liquidity: liquidity.toString(),
+      ...derived,
+    };
+  } catch (err) {
+    return { ok: false, position_found: false, error: err.message };
+  }
+}
+
+async function verifyClosed(req, connection, wallet, positionId) {
+  try {
+    await fetchPositionAccount(connection, positionId);
+    // Account still decodes: the position was not closed.
+    return { ok: false, position_closed: false };
+  } catch (err) {
+    if (/not found/.test(String(err.message))) {
+      return { ok: true, position_closed: true };
+    }
+    return { ok: false, error: err.message };
+  }
+}
+
 export async function openPosition(req, connection, wallet) {
   const poolAddress = req.pool_address;
   const { lower, upper } = req.bin_range || {};
@@ -123,12 +186,14 @@ export async function openPosition(req, connection, wallet) {
   }
 
   const { signature, slot, confirmed_via, fallback_broadcast } = await signAndSend(connection, tx, wallet, res.signers);
+  const verify = await verifyOpen(req, connection, wallet, nftMint, poolInfo);
   return {
     signature,
     slot,
     confirmed_via,
     ...(fallback_broadcast ? { fallback_broadcast } : {}),
     position_id: nftMint?.toBase58?.() ?? null,
+    verify,
   };
 }
 
@@ -140,6 +205,51 @@ export async function closePosition(req, connection, wallet) {
   const raydium = await getRaydium(connection, wallet.publicKey);
   const { poolInfo, poolKeys } = await raydium.clmm.getPoolInfoFromRpc(poolAddress);
   const ownerPosition = await fetchPositionAccount(connection, positionId);
+
+  // Program rejects closePosition while liquidity remains (err 6003):
+  // remove liquidity and close the NFT in one bundled tx via decreaseLiquidity.
+  const positionLiquidity = ownerPosition.liquidity ? new BN(ownerPosition.liquidity.toString()) : new BN(0);
+  if (positionLiquidity.gt(new BN(0))) {
+    const bps = req.max_slippage_bps ?? 100;
+    const slippage = bps / 10000;
+    const sqrtPriceCurrent = TickUtil.getSqrtPriceAtTick(Number(poolInfo.tickCurrent));
+    const { amountSlippageA, amountSlippageB } = LiquidityMathUtil.getAmountsFromLiquidityWithSlippage(
+      sqrtPriceCurrent,
+      TickUtil.getSqrtPriceAtTick(ownerPosition.tickLower),
+      TickUtil.getSqrtPriceAtTick(ownerPosition.tickUpper),
+      positionLiquidity,
+      false,
+      false,
+      1 - slippage,
+    );
+    const res = await raydium.clmm.decreaseLiquidity({
+      poolInfo,
+      poolKeys,
+      ownerPosition,
+      ownerInfo: { useSOLBalance: true, closePosition: true },
+      liquidity: positionLiquidity,
+      amountMinA: amountSlippageA,
+      amountMinB: amountSlippageB,
+      txVersion: TxVersion.LEGACY,
+    });
+
+    const tx = res.transaction;
+    if (req.mode === "simulate") {
+      const sim = await simulate(connection, tx);
+      return { tx_base64: [txToBase64(tx)], simulation: sim };
+    }
+
+    const { signature, slot, confirmed_via, fallback_broadcast } = await signAndSend(connection, tx, wallet, res.signers);
+    const verify = await verifyClosed(req, connection, wallet, positionId);
+    return {
+      signature,
+      slot,
+      confirmed_via,
+      ...(fallback_broadcast ? { fallback_broadcast } : {}),
+      note: `decreaseLiquidity bundled close, liquidity=${positionLiquidity.toString()} minA=${amountSlippageA.toString()} minB=${amountSlippageB.toString()} slippage_bps=${bps}`,
+      verify,
+    };
+  }
 
   const res = await raydium.clmm.closePosition({
     poolInfo,
@@ -155,7 +265,8 @@ export async function closePosition(req, connection, wallet) {
   }
 
   const { signature, slot, confirmed_via, fallback_broadcast } = await signAndSend(connection, tx, wallet, res.signers);
-  return { signature, slot, confirmed_via, ...(fallback_broadcast ? { fallback_broadcast } : {}) };
+  const verify = await verifyClosed(req, connection, wallet, positionId);
+  return { signature, slot, confirmed_via, ...(fallback_broadcast ? { fallback_broadcast } : {}), verify };
 }
 
 export async function claimFees(req, connection, wallet) {

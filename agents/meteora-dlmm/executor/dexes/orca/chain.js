@@ -3,7 +3,7 @@
  */
 
 import { PublicKey } from "@solana/web3.js";
-import { buildWhirlpoolClient, ORCA_WHIRLPOOL_PROGRAM_ID, WhirlpoolContext } from "@orca-so/whirlpools-sdk";
+import { buildWhirlpoolClient, ORCA_WHIRLPOOL_PROGRAM_ID, WhirlpoolContext, PriceMath } from "@orca-so/whirlpools-sdk";
 import BN from "bn.js";
 import Decimal from "decimal.js";
 import { signAndSend, simulate, txToBase64 } from "../../chain/tx.js";
@@ -25,6 +25,86 @@ function makeClient(connection, publicKey) {
 async function buildPayload(builder) {
   const payload = await builder.build();
   return { tx: payload.transaction, signers: payload.signers ?? [] };
+}
+
+function withinOnePct(got, want) {
+  if (want === 0n) return got === 0n;
+  const diff = got > want ? got - want : want - got;
+  return diff * 100n <= want;
+}
+
+const Q64 = new Decimal(2).pow(64);
+
+function amountsForLiquidity(liquidityBn, tickLower, tickUpper, tickCurrent) {
+  // Standard CLMM math on X64 sqrt prices. Returns raw integer strings.
+  const sqrtL = new Decimal(PriceMath.tickIndexToSqrtPriceX64(tickLower).toString());
+  const sqrtU = new Decimal(PriceMath.tickIndexToSqrtPriceX64(tickUpper).toString());
+  const sqrtC = new Decimal(PriceMath.tickIndexToSqrtPriceX64(tickCurrent).toString());
+  const L = new Decimal(liquidityBn.toString());
+  const amountX = L.mul(sqrtU.minus(Decimal.min(sqrtC, sqrtU))).div(Q64);
+  const amountY = L.mul(Decimal.min(sqrtC, sqrtU).minus(sqrtL)).div(Q64);
+  return { amountX: amountX.toFixed(0), amountY: amountY.toFixed(0) };
+}
+
+async function clientGetPosition(connection, wallet, address) {
+  const client = makeClient(connection, wallet.publicKey);
+  return client.getPosition(address);
+}
+
+async function verifyOpen(req, connection, wallet, positionMint, pool) {
+  try {
+    const positionPda = PublicKey.findProgramAddressSync(
+      [Buffer.from("position"), positionMint.toBuffer()],
+      ORCA_WHIRLPOOL_PROGRAM_ID
+    )[0];
+    const position = await clientGetPosition(connection, wallet, positionPda);
+    const data = position.getData();
+    const tickLower = Number(data.tickLowerIndex);
+    const tickUpper = Number(data.tickUpperIndex);
+    const expectedLower = Math.round(Number(req.bin_range?.lower ?? NaN));
+    const expectedUpper = Math.round(Number(req.bin_range?.upper ?? NaN));
+    const range_ok = tickLower === expectedLower && tickUpper === expectedUpper;
+    const liquidity = new BN(data.liquidity.toString());
+    const { amount_x = "0", amount_y = "0" } = req.liquidity || {};
+    let amounts_ok = true;
+    let derived = {};
+    try {
+      const tickCurrent = Number(pool.getData().tickCurrentIndex);
+      const { amountX, amountY } = amountsForLiquidity(liquidity, tickLower, tickUpper, tickCurrent);
+      amounts_ok = withinOnePct(BigInt(amountX), BigInt(amount_x || "0"))
+        && withinOnePct(BigInt(amountY), BigInt(amount_y || "0"));
+      derived = { derived_x_raw: amountX, derived_y_raw: amountY };
+    } catch (err) {
+      derived = { derived_error: err.message };
+    }
+    return {
+      ok: range_ok && amounts_ok,
+      position_found: true,
+      range_ok,
+      amounts_ok,
+      tick_lower_index: tickLower,
+      tick_upper_index: tickUpper,
+      liquidity: liquidity.toString(),
+      ...derived,
+    };
+  } catch (err) {
+    return { ok: false, position_found: false, error: err.message };
+  }
+}
+
+async function verifyClosed(req, connection, wallet, positionId) {
+  try {
+    await clientGetPosition(connection, wallet, new PublicKey(positionId));
+    return { ok: false, position_closed: false };
+  } catch (err) {
+    // Account gone: the close landed. Account-not-found errors surface in
+    // different shapes (SDK wrap, RPC); treat any as closed.
+    const msg = String(err?.message ?? err);
+    if (/not found|does not exist|AccountNotFound/i.test(msg)) {
+      return { ok: true, position_closed: true };
+    }
+    return { ok: false, error: msg };
+  }
 }
 
 function liquidityInputForOpen(pool, slippageBps, amountX, amountY) {
@@ -72,12 +152,14 @@ export async function openPosition(req, connection, wallet) {
   }
 
   const { signature, slot, confirmed_via, fallback_broadcast } = await signAndSend(connection, tx, wallet, signers);
+  const verify = await verifyOpen(req, connection, wallet, positionMint, pool);
   return {
     signature,
     slot,
     confirmed_via,
     ...(fallback_broadcast ? { fallback_broadcast } : {}),
     position_id: positionPda.toBase58(),
+    verify,
     notes: `positionMint=${positionMintB58} pda=${positionPda.toBase58()}`,
   };
 }
@@ -104,7 +186,8 @@ export async function closePosition(req, connection, wallet) {
     const sent = await signAndSend(connection, p.tx, wallet, p.signers);
     signatures.push(sent);
   }
-  return { signatures };
+  const verify = await verifyClosed(req, connection, wallet, positionId);
+  return { signatures, verify };
 }
 
 export async function claimFees(req, connection, wallet) {

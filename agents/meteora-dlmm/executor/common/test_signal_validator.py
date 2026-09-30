@@ -21,10 +21,11 @@ RAILS = {
     "max_slippage_bps": 100,
     "min_position_usd": 10.0,
     "max_position_usd": 100.0,
+    "min_open_score": 70.0,
 }
 
 
-def _open_signal(lower, upper, dex="orca"):
+def _open_signal(lower, upper, dex="orca", score=72.0):
     return {
         "signal_id": "tick-guard-test",
         "action": "open",
@@ -34,6 +35,7 @@ def _open_signal(lower, upper, dex="orca"):
         "bin_range": {"lower": lower, "upper": upper},
         "liquidity": {"amount_x": "1000", "amount_y": "1000"},
         "position_usd": 50.0,
+        "score": score,
         "max_slippage_bps": 100,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -65,7 +67,7 @@ class TickContainmentGuardTests(unittest.TestCase):
 
     @patch("common.signal_validator.fetch_pool_current_tick", return_value=None)
     def test_fetch_failure_warns_but_does_not_block(self, _mock):
-        signal = validate_core(_open_signal(-70, 70), CFG, RAILS)
+        signal = validate_core(_open_signal(-70, 70, score=72.0), CFG, RAILS)
         self.assertEqual(signal["action"], "open")
 
     def test_no_rpc_url_skips_guard_without_fetch(self):
@@ -73,9 +75,21 @@ class TickContainmentGuardTests(unittest.TestCase):
         with patch("common.signal_validator.fetch_pool_current_tick") as mock:
             # Empty rpc_url makes the real fetch return None without dialing.
             mock.return_value = None
-            signal = validate_core(_open_signal(-70, 70), cfg, RAILS)
+            signal = validate_core(_open_signal(-70, 70, score=72.0), cfg, RAILS)
         mock.assert_called_once()
         self.assertEqual(signal["action"], "open")
+
+    def test_score_below_min_open_score_rejected(self):
+        with self.assertRaises(SignalValidationError) as ctx:
+            validate_core(_open_signal(26000, 26400, score=69.0), CFG, RAILS)
+        self.assertIn("min_open_score", str(ctx.exception))
+
+    def test_missing_score_rejected(self):
+        sig = _open_signal(26000, 26400, score=72.0)
+        sig.pop("score")
+        with self.assertRaises(SignalValidationError) as ctx:
+            validate_core(sig, CFG, RAILS)
+        self.assertIn("missing score", str(ctx.exception).lower())
 
 
 class TickFetchDecodeTests(unittest.TestCase):

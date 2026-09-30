@@ -27,6 +27,7 @@ Current mode is set in `config/agent.config.json` → `agent.mode`.
 
 | Rail | Value | Meaning |
 |---|---|---|
+| `min_open_score` | **70.0** | Sheldon's per-pool opportunity score floor. An `open` signal must carry a `score` field ≥ this value. Missing score or below the floor is rejected. (Policy source: Sheldon `sheldon_policy.json` → `pool_eligibility.min_open_score`.) |
 | `max_position_usd` | **100** | Hard cap on a single position's value at open. (Policy source: Sheldon policy manifest.) |
 | `min_position_usd` | **10** | Below this, fees likely eat the trade — reject. (Policy source: Sheldon policy manifest.) |
 

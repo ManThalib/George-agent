@@ -41,8 +41,12 @@ import common.approvals as approvals_store
 import common.dust_queue as dust_queue
 import common.exposure_guard as exposure_guard
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "ledger"))
+import ledger as trade_ledger  # noqa: E402  (executor-local ledger module)
+
 
 SIGNALS_DIR = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/signals")
+FAILED_VERIFY_DIR = SIGNALS_DIR / "failed_verify"
 KILL_FILE = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/KILL")
 
 # --- Capital refresh chain (swap -> wallet rescan -> Sheldon re-entry) ---
@@ -289,16 +293,61 @@ def _iter_pending() -> List[Path]:
 
 def _move_to_processed(signal_path: Path) -> Path:
     processed_dir = SIGNALS_DIR / "processed"
-    processed_dir.mkdir(parents=True, exist_ok=True)
-    dest = processed_dir / signal_path.name
+    return _move_to_dir(signal_path, processed_dir)
+
+
+def _move_to_dir(signal_path: Path, dest_dir: Path) -> Path:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / signal_path.name
     if dest.exists():
-        dest = processed_dir / f"{signal_path.stem}-{int(time.time())}{signal_path.suffix}"
+        dest = dest_dir / f"{signal_path.stem}-{int(time.time())}{signal_path.suffix}"
     shutil.move(str(signal_path), str(dest))
     return dest
 
 
 def _notify_owner(text: str) -> None:
     print(f"[OWNER_NOTIFICATION] {text}")
+
+
+def _now_utc_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _self_verify_block(details: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The verify block written by the per-DEX chain handler, if any."""
+    result = details.get("result")
+    if isinstance(result, dict) and isinstance(result.get("verify"), dict):
+        return result["verify"]
+    return None
+
+
+def _handle_self_verify(signal: Dict[str, Any], signal_path: Path,
+                        details: Dict[str, Any]) -> Path:
+    """Route an executed signal based on its on-chain self-verification.
+
+    Opens that fail (or lack) verification go to signals/failed_verify/
+    instead of processed/, with an owner notification. Closes are only
+    flagged: the execution already happened and is journaled as executed.
+    Returns the directory the signal file landed in.
+    """
+    action = signal.get("action")
+    verify = _self_verify_block(details)
+    if action == "open" and (verify is None or not verify.get("ok")):
+        dest = _move_to_dir(signal_path, FAILED_VERIFY_DIR)
+        _notify_owner(
+            f"SELF-VERIFY FAILED signal={signal.get('signal_id')} action=open "
+            f"dex={signal.get('dex')} pool={signal.get('pool_address')} "
+            f"verify={json.dumps(verify, default=str)}; moved to {dest}"
+        )
+        return dest
+    if action == "close" and (verify is None or not verify.get("ok")):
+        _notify_owner(
+            f"SELF-VERIFY WARNING signal={signal.get('signal_id')} action=close "
+            f"dex={signal.get('dex')} pool={signal.get('pool_address')} "
+            f"verify={json.dumps(verify, default=str)}; position may remain on-chain"
+        )
+    return _move_to_processed(signal_path)
 
 
 def _summarise_simulation(sim: Any) -> str:
@@ -528,10 +577,19 @@ def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> List[Dict[str, Any]]
             status, details = process_signal_path(signal_path, cfg, rails)
             print(f"  {signal_path.name} -> {status}: {details.get('error') or details.get('notes', '')}")
             if status in {"rejected", "failed", "awaiting_approval", "dry_run", "executed", "queued_for_review"}:
-                _move_to_processed(signal_path)
+                if status == "executed":
+                    try:
+                        executed_signal = load_json(signal_path)
+                    except Exception:
+                        executed_signal = {"signal_id": signal_path.stem}
+                    landed = _handle_self_verify(executed_signal, signal_path, details)
+                    readback = landed
+                else:
+                    _move_to_processed(signal_path)
+                    readback = _processed_path(signal_path)
             if status == "executed":
                 try:
-                    processed_signal = load_json(_processed_path(signal_path))
+                    processed_signal = load_json(readback)
                 except Exception:
                     processed_signal = {"signal_id": signal_path.stem}
                 executed.append(processed_signal)
@@ -565,6 +623,14 @@ def process_signal_path(signal_path: Path, cfg: Dict[str, Any], rails: Dict[str,
         details=details,
         rails_hash=rails_hash(RAILS_PATH),
     )
+    if status == "executed":
+        try:
+            trade_ledger.append_row(
+                trade_ledger.build_row(signal, status, details, _now_utc_iso())
+            )
+        except Exception as exc:
+            # A ledger failure must never mask the execution result.
+            print(f"[{utc_now()}] ledger row append failed: {exc}")
     return status, details
 
 
@@ -598,6 +664,13 @@ def do_approve(signal_id: str, cfg: Dict[str, Any], rails: Dict[str, Any]) -> No
         details=details,
         rails_hash=rails_hash(RAILS_PATH),
     )
+    if decision == "executed":
+        try:
+            trade_ledger.append_row(
+                trade_ledger.build_row(signal, decision, details, _now_utc_iso())
+            )
+        except Exception as exc:
+            print(f"[{utc_now()}] ledger row append failed: {exc}")
     if decision == "executed" and action == "swap":
         try:
             amt = int(signal.get("amount") or 0)
@@ -608,7 +681,24 @@ def do_approve(signal_id: str, cfg: Dict[str, Any], rails: Dict[str, Any]) -> No
         _trigger_capital_refresh(cfg, signal_id, expected, ambiguous)
     print(f"{signal_id} -> {decision}: {details}")
     if decision == "executed":
-        approvals_store.move_to(signal_id, approvals_store.APPROVED_DIR)
+        verify = _self_verify_block(details)
+        if action == "open" and (verify is None or not verify.get("ok")):
+            _notify_owner(
+                f"SELF-VERIFY FAILED signal={signal_id} action=open "
+                f"dex={signal.get('dex')} pool={signal.get('pool_address')} "
+                f"verify={json.dumps(verify, default=str)}; approval moved to "
+                f"failed_verify/ for review"
+            )
+            approvals_store.move_to(signal_id, approvals_store.FAILED_VERIFY_DIR)
+        elif action == "close" and (verify is None or not verify.get("ok")):
+            _notify_owner(
+                f"SELF-VERIFY WARNING signal={signal_id} action=close "
+                f"dex={signal.get('dex')} pool={signal.get('pool_address')} "
+                f"verify={json.dumps(verify, default=str)}; position may remain on-chain"
+            )
+            approvals_store.move_to(signal_id, approvals_store.APPROVED_DIR)
+        else:
+            approvals_store.move_to(signal_id, approvals_store.APPROVED_DIR)
     else:
         approvals_store.move_to(signal_id, approvals_store.REJECTED_DIR)
 

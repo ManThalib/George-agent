@@ -257,6 +257,21 @@ def validate_core(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, 
                 f"position_usd {position_usd:.2f} > max_position_usd {max_pos:.2f}"
             )
 
+        # Score floor: Sheldon owns the threshold value, George enforces it
+        # fail-closed. An open without a score cannot prove it crossed the
+        # threshold, so it is rejected (owner-confirmed policy).
+        min_score = float(rails.get("min_open_score", 70.0))
+        try:
+            score = float(signal.get("score"))
+        except (TypeError, ValueError):
+            raise SignalValidationError(
+                "open signal missing score; cannot verify min_open_score rail"
+            ) from None
+        if score < min_score:
+            raise SignalValidationError(
+                f"score {score} < min_open_score {min_score}"
+            )
+
     return signal
 
 

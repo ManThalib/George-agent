@@ -27,6 +27,7 @@
   },
 
   "range_limits": {
+    "min_open_score": 70.0,
     "max_bin_range_width": 2000,
     "max_meteora_range_width": 70,
     "max_orca_range_width": 2000,

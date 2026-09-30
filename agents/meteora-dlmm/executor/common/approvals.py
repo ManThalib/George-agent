@@ -11,6 +11,7 @@ APPROVALS_DIR = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlm
 PENDING_DIR = APPROVALS_DIR / "pending"
 APPROVED_DIR = APPROVALS_DIR / "approved"
 REJECTED_DIR = APPROVALS_DIR / "rejected"
+FAILED_VERIFY_DIR = APPROVALS_DIR / "failed_verify"
 
 
 def _now() -> str:

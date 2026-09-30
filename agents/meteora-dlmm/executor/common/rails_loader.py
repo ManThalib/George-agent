@@ -35,6 +35,7 @@ DEFAULT_RAILS: Dict[str, Any] = {
     "one_tx_at_a_time": True,
     "min_pool_liquidity_usd": 250000.0,
     "min_24h_volume_usd": 1000000.0,
+    "min_open_score": 70.0,
     "allowed_bin_steps": [10, 20, 25, 50, 100],
     "max_bin_range_width": 2000,
     "max_meteora_range_width": 70,
@@ -95,6 +96,7 @@ def _load_sheldon_policy() -> Dict[str, Any]:
     pool = data.get("pool_eligibility") or {}
     policy["min_pool_liquidity_usd"] = pool.get("min_pool_liquidity_usd")
     policy["min_24h_volume_usd"] = pool.get("min_24h_volume_usd")
+    policy["min_open_score"] = pool.get("min_open_score")
     policy["allowed_bin_steps"] = pool.get("allowed_bin_steps")
 
     sizing = data.get("position_sizing") or {}
@@ -137,6 +139,7 @@ _RAIL_PARSERS = {
     "max_raydium_range_width": int,
     "min_pool_liquidity_usd": float,
     "min_24h_volume_usd": float,
+    "min_open_score": float,
 }
 
 
