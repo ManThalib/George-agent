@@ -1,0 +1,149 @@
+"""Stateful exposure, daily-loss, and drawdown guard.
+
+The executor re-reads this state before every OPEN transaction. The state is
+kept in `state/exposure_state.json` and updated as the dispatcher executes
+opens and closes.
+
+Sheldon provides a `position_usd` field on OPEN signals. The guard uses that
+value together with the stored state to enforce the rails documented in
+SAFETY_RAILS.md and execution_limits.json.
+"""
+
+import json
+import os
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+
+STATE_DIR = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/state")
+STATE_PATH = STATE_DIR / "exposure_state.json"
+
+
+def _today() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def load_state() -> Dict[str, Any]:
+    """Return the current guard state, defaulting to a fresh empty state."""
+    try:
+        with open(STATE_PATH, "r", encoding="utf-8") as fh:
+            state = json.load(fh)
+        if isinstance(state, dict):
+            return state
+    except Exception:
+        pass
+    return {
+        "open_positions": [],
+        "daily_loss_usd": 0.0,
+        "max_daily_loss_usd": 0.0,
+        "peak_portfolio_usd": 0.0,
+        "session_start_value_usd": 0.0,
+        "last_reset_date": _today(),
+    }
+
+
+def save_state(state: Dict[str, Any]) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(STATE_PATH, "w", encoding="utf-8") as fh:
+        json.dump(state, fh, indent=2)
+
+
+def reset_daily_if_needed(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Zero daily counters when the UTC date rolls over."""
+    if state.get("last_reset_date") != _today():
+        state["daily_loss_usd"] = 0.0
+        state["last_reset_date"] = _today()
+    return state
+
+
+def _total_exposure(open_positions: List[Dict[str, Any]]) -> float:
+    return sum(float(p.get("position_usd", 0.0)) for p in open_positions)
+
+
+def _drawdown_pct(state: Dict[str, Any]) -> float:
+    peak = float(state.get("peak_portfolio_usd") or 0.0)
+    current = float(state.get("session_start_value_usd") or 0.0)
+    if peak <= 0 or current <= 0:
+        return 0.0
+    return (peak - current) / peak * 100.0
+
+
+def check_open_allowed(signal: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[bool, str]:
+    """Return (allowed, reason_or_empty).
+
+    Checks:
+      - position_usd inside [min_position_usd, max_position_usd]
+      - open_positions < max_open_positions
+      - total_exposure + position_usd <= max_total_exposure_usd
+      - daily_loss_usd < max_daily_loss_usd
+      - drawdown_pct < max_drawdown_pct
+    """
+    state = reset_daily_if_needed(load_state())
+
+    position_usd = signal.get("position_usd")
+    try:
+        position_usd = float(position_usd)
+    except (TypeError, ValueError):
+        return False, "position_usd missing or non-numeric; fail-closed"
+
+    min_pos = float(rails.get("min_position_usd", 10.0))
+    max_pos = float(rails.get("max_position_usd", 100.0))
+    if position_usd < min_pos:
+        return False, f"position_usd {position_usd:.2f} < min {min_pos:.2f}"
+    if position_usd > max_pos:
+        return False, f"position_usd {position_usd:.2f} > max {max_pos:.2f}"
+
+    open_positions = state.get("open_positions") or []
+    max_open = int(rails.get("max_open_positions", 3))
+    if len(open_positions) >= max_open:
+        return False, f"open positions {len(open_positions)} >= max {max_open}"
+
+    max_exposure = float(rails.get("max_total_exposure_usd", 300.0))
+    current_exposure = _total_exposure(open_positions)
+    if current_exposure + position_usd > max_exposure:
+        return False, (
+            f"exposure ${current_exposure + position_usd:.2f} > max "
+            f"${max_exposure:.2f}"
+        )
+
+    max_daily_loss = float(rails.get("max_daily_loss_usd", 50.0))
+    daily_loss = float(state.get("daily_loss_usd") or 0.0)
+    if daily_loss >= max_daily_loss:
+        return False, f"daily loss ${daily_loss:.2f} >= max ${max_daily_loss:.2f}"
+
+    max_drawdown = float(rails.get("max_drawdown_pct", 10.0))
+    dd = _drawdown_pct(state)
+    if dd >= max_drawdown:
+        return False, f"drawdown {dd:.2f}% >= max {max_drawdown:.2f}%"
+
+    return True, ""
+
+
+def record_open_executed(signal: Dict[str, Any]) -> None:
+    """Call after an OPEN transaction has been confirmed."""
+    state = load_state()
+    open_positions: List[Dict[str, Any]] = state.get("open_positions") or []
+    open_positions.append({
+        "pool_address": signal.get("pool_address"),
+        "position_usd": float(signal.get("position_usd") or 0.0),
+        "opened_at": datetime.now(timezone.utc).isoformat(),
+    })
+    state["open_positions"] = open_positions
+    save_state(state)
+
+
+def record_close_executed(signal: Dict[str, Any], realized_pnl_usd: float = 0.0) -> None:
+    """Call after a CLOSE transaction has been confirmed.
+
+    Removes the matching open position and books any realized loss toward
+    the daily loss counter.
+    """
+    state = load_state()
+    open_positions: List[Dict[str, Any]] = state.get("open_positions") or []
+    pool_address = signal.get("pool_address")
+    open_positions = [p for p in open_positions if p.get("pool_address") != pool_address]
+    state["open_positions"] = open_positions
+    if realized_pnl_usd < 0:
+        state["daily_loss_usd"] = float(state.get("daily_loss_usd") or 0.0) - realized_pnl_usd
+    save_state(state)

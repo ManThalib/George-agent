@@ -17,7 +17,11 @@ from common.signal_validator import SignalValidationError, validate_core  # noqa
 
 
 CFG = {"signal_max_age_seconds": 300, "rpc_https_url": "https://rpc.test"}
-RAILS = {"max_slippage_bps": 100}
+RAILS = {
+    "max_slippage_bps": 100,
+    "min_position_usd": 10.0,
+    "max_position_usd": 100.0,
+}
 
 
 def _open_signal(lower, upper, dex="orca"):
@@ -29,6 +33,7 @@ def _open_signal(lower, upper, dex="orca"):
         "side": "bidirectional",
         "bin_range": {"lower": lower, "upper": upper},
         "liquidity": {"amount_x": "1000", "amount_y": "1000"},
+        "position_usd": 50.0,
         "max_slippage_bps": 100,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }

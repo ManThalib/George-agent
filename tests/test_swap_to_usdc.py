@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 # Make the executor modules importable from this workspace-level test.
 _EXECUTOR_DIR = Path(__file__).resolve().parent.parent / "agents" / "meteora-dlmm" / "executor"
@@ -139,9 +140,12 @@ class TestSwapToUsdc(unittest.TestCase):
             raydium_validator.validate(_valid_open(dex="raydium", width=600), cfg, rails)
         self.assertIn("raydium range width 600 (inclusive) exceeds rail 500", str(ctx.exception))
 
-        # Meteora is capped at 70 bins by default.
-        meteora_validator.validate(_valid_open(dex="meteora", width=70), cfg, rails)
-        with self.assertRaises(signal_validator.SignalValidationError) as ctx:
+        # Meteora is capped at 70 bins by default. The bin-step rail is
+        # patched to an allowed step: width is what this test exercises.
+        with patch("common.signal_validator.fetch_pool_bin_step", return_value=10):
+            meteora_validator.validate(_valid_open(dex="meteora", width=70), cfg, rails)
+        with patch("common.signal_validator.fetch_pool_bin_step", return_value=10), \
+                self.assertRaises(signal_validator.SignalValidationError) as ctx:
             meteora_validator.validate(_valid_open(dex="meteora", width=71), cfg, rails)
         self.assertIn("meteora range width 71 (inclusive) exceeds rail 70", str(ctx.exception))
 

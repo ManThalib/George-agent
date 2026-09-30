@@ -39,6 +39,7 @@ from common.signal_validator import SignalValidationError, validate_core
 from common.chain_client import ChainError, simulate as chain_simulate, send as chain_send
 import common.approvals as approvals_store
 import common.dust_queue as dust_queue
+import common.exposure_guard as exposure_guard
 
 
 SIGNALS_DIR = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/signals")
@@ -83,6 +84,15 @@ def _dispatcher_lock(timeout_seconds: int = 600):
             fcntl.flock(fh, fcntl.LOCK_UN)
         finally:
             fh.close()
+
+
+def _record_execution_state(signal: Dict[str, Any]) -> None:
+    """Update persistent execution state after a successful on-chain tx."""
+    action = signal.get("action")
+    if action == "open":
+        exposure_guard.record_open_executed(signal)
+    elif action in {"close", "claim_fees"}:
+        exposure_guard.record_close_executed(signal)
 
 
 def _reentry_window(state: Dict[str, Any], now: float) -> List[float]:
@@ -335,13 +345,17 @@ def _build_swap_request(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict
 
 
 def _run_simulation(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    """Simulate a signal that has already passed validation.
+
+    `process_signal()` is responsible for the one validation call; callers
+    here must receive a validated signal and never re-validate.
+    """
     action = signal["action"]
     if action == "swap":
         req = _build_swap_request(signal, cfg, rails)
     else:
         dex = signal.get("dex") or "meteora"
-        dex_validate, dex_builder = _get_dex_module(dex)
-        signal = dex_validate(signal, cfg, rails)
+        _dex_validate, dex_builder = _get_dex_module(dex)
         req = dex_builder.build(signal, cfg, rails)
 
     try:
@@ -359,13 +373,17 @@ def _run_simulation(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str
 
 
 def _do_send(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    """Send a signal that has already passed validation.
+
+    `process_signal()` is responsible for the one validation call; callers
+    here must receive a validated signal and never re-validate.
+    """
     action = signal["action"]
     if action == "swap":
         req = _build_swap_request(signal, cfg, rails)
     else:
         dex = signal.get("dex") or "meteora"
-        dex_validate, dex_builder = _get_dex_module(dex)
-        signal = dex_validate(signal, cfg, rails)
+        _dex_validate, dex_builder = _get_dex_module(dex)
         req = dex_builder.build(signal, cfg, rails)
 
     try:
@@ -405,6 +423,12 @@ def process_signal(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str,
         dex = signal.get("dex") or "meteora"
         dex_validate, _ = _get_dex_module(dex)
         signal = dex_validate(signal, cfg, rails)
+
+    # Exposure / loss / drawdown guard (only for new opens).
+    if action == "open":
+        allowed, reason = exposure_guard.check_open_allowed(signal, rails)
+        if not allowed:
+            return "rejected", {"stage": "exposure_guard", "error": reason}
 
     mode = cfg.get("mode", "dry_run")
     if mode == "auto":
@@ -507,9 +531,11 @@ def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> List[Dict[str, Any]]
                 _move_to_processed(signal_path)
             if status == "executed":
                 try:
-                    executed.append(load_json(_processed_path(signal_path)))
+                    processed_signal = load_json(_processed_path(signal_path))
                 except Exception:
-                    executed.append({"signal_id": signal_path.stem})
+                    processed_signal = {"signal_id": signal_path.stem}
+                executed.append(processed_signal)
+                _record_execution_state(processed_signal)
     return executed
 
 

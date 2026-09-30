@@ -27,16 +27,27 @@ _TICK_DECODE_OFFSETS = {
     "raydium": 304,  # PoolState.tickCurrent
 }
 
+# Byte offset of the pool's bin/tick step (u16, little-endian, unsigned).
+# Only Meteora DLMM appears here: bins are a DLMM concept, Orca/Raydium
+# CLMMs use tick_spacing instead.
+#   meteora: LbPair.bin_step @ 80, immediately after LbPair.activeId (i32 @ 76).
+#     Verified on three live mainnet LbPairs with reported bin_steps 4, 10,
+#     and 20: the u16 at offset 80 matched the reported value on every
+#     account. (Offset 73 also echoes the value — that is the bin_step_seed
+#     PDA copy, not the typed field; do not use it.)
+_BIN_STEP_DECODE_OFFSETS = {
+    "meteora": 80,
+}
+
 
 class SignalValidationError(Exception):
     pass
 
 
-def fetch_pool_current_tick(dex: str, pool_address: str, rpc_url: str,
-                            timeout: float = 10.0) -> Optional[int]:
-    """Return the pool's live current tick/bin, or None when unavailable."""
-    offset = _TICK_DECODE_OFFSETS.get((dex or "").lower())
-    if not offset or not pool_address or not rpc_url:
+def _fetch_pool_account_blob(pool_address: str, rpc_url: str,
+                             timeout: float) -> Optional[bytes]:
+    """Return the raw account bytes, or None when unavailable."""
+    if not pool_address or not rpc_url:
         return None
     try:
         payload = {
@@ -56,12 +67,33 @@ def fetch_pool_current_tick(dex: str, pool_address: str, rpc_url: str,
         raw = data[0] if isinstance(data, list) and data else data
         if not isinstance(raw, str):
             return None
-        blob = base64.b64decode(raw)
-        if len(blob) < offset + 4:
-            return None
-        return int.from_bytes(blob[offset : offset + 4], "little", signed=True)
+        return base64.b64decode(raw)
     except Exception:
         return None
+
+
+def fetch_pool_current_tick(dex: str, pool_address: str, rpc_url: str,
+                            timeout: float = 10.0) -> Optional[int]:
+    """Return the pool's live current tick/bin, or None when unavailable."""
+    offset = _TICK_DECODE_OFFSETS.get((dex or "").lower())
+    if not offset:
+        return None
+    blob = _fetch_pool_account_blob(pool_address, rpc_url, timeout)
+    if blob is None or len(blob) < offset + 4:
+        return None
+    return int.from_bytes(blob[offset : offset + 4], "little", signed=True)
+
+
+def fetch_pool_bin_step(dex: str, pool_address: str, rpc_url: str,
+                        timeout: float = 10.0) -> Optional[int]:
+    """Return the pool's on-chain bin/tick step (u16), or None when unavailable."""
+    offset = _BIN_STEP_DECODE_OFFSETS.get((dex or "").lower())
+    if not offset:
+        return None
+    blob = _fetch_pool_account_blob(pool_address, rpc_url, timeout)
+    if blob is None or len(blob) < offset + 2:
+        return None
+    return int.from_bytes(blob[offset : offset + 2], "little", signed=False)
 
 
 def _check_swap(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> None:
@@ -202,6 +234,27 @@ def validate_core(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, 
 
     if action in {"close", "claim_fees", "claim_rewards"} and not signal.get("position_id"):
         raise SignalValidationError(f"{action} requires position_id")
+
+    # Position sizing rails: Sheldon owns the policy, but George enforces it
+    # fail-closed before any transaction can reach the builder.
+    if action == "open":
+        position_usd = signal.get("position_usd")
+        try:
+            position_usd = float(position_usd)
+        except (TypeError, ValueError):
+            raise SignalValidationError(
+                "open signal missing position_usd; cannot verify sizing rails"
+            ) from None
+        min_pos = float(rails.get("min_position_usd", 10.0))
+        max_pos = float(rails.get("max_position_usd", 100.0))
+        if position_usd < min_pos:
+            raise SignalValidationError(
+                f"position_usd {position_usd:.2f} < min_position_usd {min_pos:.2f}"
+            )
+        if position_usd > max_pos:
+            raise SignalValidationError(
+                f"position_usd {position_usd:.2f} > max_position_usd {max_pos:.2f}"
+            )
 
     return signal
 
