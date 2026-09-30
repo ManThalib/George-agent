@@ -70,7 +70,7 @@ export async function closePosition(req, connection, wallet) {
 
   // 1. Remove liquidity from all populated bins.
   const bins = (position.positionData?.positionBinData || []).filter((b) => BigInt(b.positionLiquidity || "0") > 0n);
-  const signatures = [];
+  let removeTxs = [];
   if (bins.length > 0) {
     const fromBinId = Math.min(...bins.map((b) => b.binId));
     const toBinId = Math.max(...bins.map((b) => b.binId));
@@ -83,11 +83,26 @@ export async function closePosition(req, connection, wallet) {
       bps: new BN(10000),
       shouldClaimAndClose: false,
     });
-    const removeTxs = asTransactions(removeTx);
-    for (const tx of removeTxs) {
-      const sent = await signAndSend(connection, tx, wallet, []);
-      signatures.push({ step: "removeLiquidity", ...sent });
-    }
+    removeTxs = asTransactions(removeTx);
+  }
+
+  if (req.mode === "simulate") {
+    // Only the withdrawal is simulated: the claim/close steps build on the
+    // state the withdrawal would leave behind, so simulating them here would
+    // report a spurious NonEmptyPosition. With nothing to withdraw, simulate
+    // the close itself.
+    const txs = removeTxs.length
+      ? removeTxs
+      : [await dlmm.closePosition({ owner: wallet.publicKey, position })].filter(Boolean);
+    if (!txs.length) throw new Error("meteora close built no transaction");
+    const sims = await Promise.all(txs.map((tx) => simulate(connection, tx)));
+    return { tx_base64: txs.map((tx) => txToBase64(tx)), simulation: sims };
+  }
+
+  const signatures = [];
+  for (const tx of removeTxs) {
+    const sent = await signAndSend(connection, tx, wallet, []);
+    signatures.push({ step: "removeLiquidity", ...sent });
   }
 
   // 2. Claim any accrued fees.

@@ -61,9 +61,10 @@ export async function openPosition(req, connection, wallet) {
   });
 
   const tx = res.transaction;
+  const nftMint = res.extInfo?.address?.nftMint ?? res.extInfo?.nftMint;
   if (req.mode === "simulate") {
     const sim = await simulate(connection, tx);
-    return { tx_base64: [txToBase64(tx)], simulation: sim, notes: `extInfo=${JSON.stringify(Object.keys(res.extInfo))}` };
+    return { tx_base64: [txToBase64(tx)], simulation: sim, notes: `extInfo=${JSON.stringify(Object.keys(res.extInfo))}`, position_id: nftMint?.toBase58?.() ?? null };
   }
 
   const { signature, slot, confirmed_via, fallback_broadcast } = await signAndSend(connection, tx, wallet, res.signers);
@@ -72,7 +73,7 @@ export async function openPosition(req, connection, wallet) {
     slot,
     confirmed_via,
     ...(fallback_broadcast ? { fallback_broadcast } : {}),
-    position_id: res.extInfo?.nftMint?.toBase58?.() ?? null,
+    position_id: nftMint?.toBase58?.() ?? null,
   };
 }
 
