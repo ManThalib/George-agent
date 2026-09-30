@@ -18,13 +18,14 @@ SWAP_TO_USDC_REQUIRED_FIELDS = {"mint", "symbol", "decimals", "amount_raw", "amo
 VALID_ACTIONS = {"open", "close", "claim_fees", "claim_rewards", "swap", "swap_to_usdc"}
 
 # Byte offset of the live current tick/bin (i32, little-endian, signed) in
-# each DEX's on-chain pool account. Meteora and Orca verified against live
-# mainnet accounts; Raydium derived from the zero-copy POD layout and must
-# be treated as best-effort.
+# each DEX's on-chain pool account. All three verified against live mainnet
+# accounts; Raydium verified 2026-09-30 on 3 mainnet CLMM pools (spacing
+# u16@235 matched 120/60/60 and tickCurrent@269 equals the value implied by
+# sqrtPriceX64@253 on every account — the old 304 derivation was wrong).
 _TICK_DECODE_OFFSETS = {
     "meteora": 76,   # LbPair.activeId
     "orca": 81,      # Whirlpool.tickCurrentIndex
-    "raydium": 304,  # PoolState.tickCurrent
+    "raydium": 269,  # PoolState.tickCurrent
 }
 
 # Byte offset of the pool's bin/tick step (u16, little-endian, unsigned).

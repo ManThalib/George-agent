@@ -48,6 +48,8 @@ def _valid_open(action: str = "open", dex: str = "raydium", width: int = 2000) -
         "pool_address": "So1anaPoo1AddresS123456789012345678901234567890",
         "bin_range": {"lower": 0, "upper": width - 1},
         "liquidity": {"amount_x": "1000000", "amount_y": "500000"},
+        # Required by the sizing rail: within default min/max (10..100).
+        "position_usd": 50.0,
         "max_slippage_bps": 50,
         "reason": "test range width",
         "created_at": _now_iso(),
