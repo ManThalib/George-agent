@@ -60,6 +60,16 @@ function withinOnePct(got, want) {
   return diff * 100n <= want;
 }
 
+// The on-chain program computes required deposit amounts from the pool's live
+// sqrtPriceX64, which is NOT the same as TickUtil.getSqrtPriceAtTick(tickCurrent)
+// (the pool price sits partway between ticks). For a narrow range the two differ
+// by more than the 1% slippage pad, so the open is rejected with
+// PriceSlippageCheck (6017). Use the live sqrt price for every amount computation
+// so the SDK and the program agree.
+function liveSqrtPrice(poolInfo) {
+  return new BN(poolInfo.sqrtPriceX64.toString());
+}
+
 async function verifyOpen(req, connection, wallet, nftMint, poolInfo) {
   try {
     const ownerPosition = await fetchPositionAccount(connection, nftMint);
@@ -73,7 +83,7 @@ async function verifyOpen(req, connection, wallet, nftMint, poolInfo) {
     let amounts_ok = true;
     let derived = {};
     try {
-      const sqrtCurrent = TickUtil.getSqrtPriceAtTick(Number(poolInfo.tickCurrent));
+      const sqrtCurrent = liveSqrtPrice(poolInfo);
       const { amountA, amountB } = LiquidityMathUtil.getAmountsForLiquidity(
         sqrtCurrent,
         TickUtil.getSqrtPriceAtTick(tickLower),
@@ -137,8 +147,9 @@ export async function openPosition(req, connection, wallet) {
   // opened with a minted NFT but no deposit, and both simulation and the
   // on-chain program succeeded (seen live 2026-09-30, pool 3ucNos4N...).
   const tickCurrent = Number(poolInfo.tickCurrent);
+  const sqrtCurrent = liveSqrtPrice(poolInfo);
   const liquidity = LiquidityMathUtil.getLiquidityFromAmounts(
-    TickUtil.getSqrtPriceAtTick(tickCurrent),
+    sqrtCurrent,
     TickUtil.getSqrtPriceAtTick(tickLower),
     TickUtil.getSqrtPriceAtTick(tickUpper),
     new BN(amount_x),
@@ -155,7 +166,7 @@ export async function openPosition(req, connection, wallet) {
   // live 2026-09-30). Pad the maxes by the slippage rail (≤1%) to absorb
   // drift between this snapshot and execution.
   const { amountA, amountB } = LiquidityMathUtil.getAmountsForLiquidity(
-    TickUtil.getSqrtPriceAtTick(tickCurrent),
+    sqrtCurrent,
     TickUtil.getSqrtPriceAtTick(tickLower),
     TickUtil.getSqrtPriceAtTick(tickUpper),
     liquidity,

@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 import traceback
 from contextlib import contextmanager
 from pathlib import Path
@@ -97,6 +98,10 @@ def _record_execution_state(signal: Dict[str, Any]) -> None:
         exposure_guard.record_open_executed(signal)
     elif action in {"close", "claim_fees"}:
         exposure_guard.record_close_executed(signal)
+    elif action == "add_liquidity":
+        exposure_guard.record_add_executed(signal)
+    elif action == "remove_liquidity":
+        exposure_guard.record_remove_executed(signal)
 
 
 def _reentry_window(state: Dict[str, Any], now: float) -> List[float]:
@@ -333,10 +338,10 @@ def _handle_self_verify(signal: Dict[str, Any], signal_path: Path,
     """
     action = signal.get("action")
     verify = _self_verify_block(details)
-    if action == "open" and (verify is None or not verify.get("ok")):
+    if action in {"open", "add_liquidity"} and (verify is None or not verify.get("ok")):
         dest = _move_to_dir(signal_path, FAILED_VERIFY_DIR)
         _notify_owner(
-            f"SELF-VERIFY FAILED signal={signal.get('signal_id')} action=open "
+            f"SELF-VERIFY FAILED signal={signal.get('signal_id')} action={action} "
             f"dex={signal.get('dex')} pool={signal.get('pool_address')} "
             f"verify={json.dumps(verify, default=str)}; moved to {dest}"
         )
@@ -453,10 +458,66 @@ def _sim_ok(sim: Any) -> bool:
     return bool(sim and sim.get("ok"))
 
 
+def _build_dust_swap_request(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a Jupiter swap request from a swap_to_usdc dust signal."""
+    return {
+        "dex": "jupiter",
+        "action": "swap",
+        "mode": "send",
+        "rpc_url": cfg["rpc_https_url"],
+        "fallback_rpc_urls": cfg.get("rpc_fallback_urls", []),
+        "fallback_delay_seconds": cfg.get("rpc_fallback_delay_seconds", 15),
+        "wallet_public_key": cfg["wallet_public_key"],
+        "max_slippage_bps": min(
+            int(signal.get("max_slippage_bps", rails.get("max_slippage_bps", 100))),
+            int(rails.get("max_slippage_bps", 100)),
+        ),
+        "priority_fee_cap_sol": rails.get("priority_fee_cap_sol", 0.0005),
+        "input_mint": signal["mint"],
+        "output_mint": USDC_MINT,
+        "amount": int(signal["amount_raw"]),
+        "exact_out": signal.get("exact_out", False),
+        "max_price_impact_pct": rails.get("max_price_impact_pct", 1.5),
+    }
+
+
+def _handle_swap_to_usdc(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    """Auto-execute a dust swap to USDC when the executor is in auto mode."""
+    try:
+        req = _build_dust_swap_request(signal, cfg, rails)
+    except (KeyError, TypeError, ValueError) as exc:
+        return "rejected", {"stage": "dust_swap_build", "error": str(exc)}
+
+    try:
+        sim = chain_simulate(req)
+    except ChainError as exc:
+        return "failed", {"stage": "simulate", "error": str(exc)}
+    except Exception as exc:
+        return "failed", {"stage": "simulate", "error": str(exc), "traceback": traceback.format_exc()}
+
+    if not _sim_ok(sim):
+        return "rejected", {"stage": "simulate", "error": "simulation failed", "simulation": sim.get("simulation")}
+
+    try:
+        result = chain_send(req)
+    except ChainError as exc:
+        return "failed", {"stage": "send", "error": str(exc)}
+    except Exception as exc:
+        return "failed", {"stage": "send", "error": str(exc), "traceback": traceback.format_exc()}
+
+    details: Dict[str, Any] = {"result": result}
+    for key in ("confirmed_via", "fallback_broadcast", "confirmations"):
+        if isinstance(result, dict) and result.get(key) is not None:
+            details[key] = result[key]
+    return "executed", details
+
+
 def process_signal(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     action = signal.get("action")
 
     if action == "swap_to_usdc":
+        if cfg.get("mode") == "auto":
+            return _handle_swap_to_usdc(signal, cfg, rails)
         path = dust_queue.queue(signal)
         _notify_owner(
             f"DUST SWAP QUEUED signal={signal['signal_id']} "
@@ -473,9 +534,14 @@ def process_signal(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str,
         dex_validate, _ = _get_dex_module(dex)
         signal = dex_validate(signal, cfg, rails)
 
-    # Exposure / loss / drawdown guard (only for new opens).
+    # Exposure / loss / drawdown guard: new opens and adds deploy capital;
+    # removes are de-risking and always pass.
     if action == "open":
         allowed, reason = exposure_guard.check_open_allowed(signal, rails)
+        if not allowed:
+            return "rejected", {"stage": "exposure_guard", "error": reason}
+    elif action == "add_liquidity":
+        allowed, reason = exposure_guard.check_add_allowed(signal, rails)
         if not allowed:
             return "rejected", {"stage": "exposure_guard", "error": reason}
 
@@ -743,6 +809,91 @@ def do_list_dust_swaps() -> None:
         )
 
 
+def do_sweep_dust_swaps(cfg: Dict[str, Any], rails: Dict[str, Any]) -> None:
+    """Execute pending dust swaps now, keeping only the latest record per mint.
+
+    Only usable when mode is auto. Older duplicate records for the same mint
+    are marked skipped so they are not retried.
+    """
+    if cfg.get("mode") != "auto":
+        print("Executor is not in auto mode; refusing to sweep dust swaps.")
+        sys.exit(1)
+
+    records = dust_queue.list_pending()
+    if not records:
+        print("No dust swaps pending review.")
+        return
+
+    # Keep the latest record per mint to avoid swapping the same token twice.
+    by_mint: Dict[str, Dict[str, Any]] = {}
+    for rec in records:
+        signal = rec.get("signal", {})
+        mint = signal.get("mint")
+        if not isinstance(mint, str):
+            continue
+        existing = by_mint.get(mint)
+        if existing is None:
+            by_mint[mint] = rec
+            continue
+        existing_signal = existing.get("signal", {})
+        try:
+            existing_ts = datetime.fromisoformat(str(existing_signal.get("created_at", "1970-01-01T00:00:00+00:00")).replace("Z", "+00:00"))
+        except ValueError:
+            existing_ts = datetime.min.replace(tzinfo=timezone.utc)
+        try:
+            rec_ts = datetime.fromisoformat(str(signal.get("created_at", "1970-01-01T00:00:00+00:00")).replace("Z", "+00:00"))
+        except ValueError:
+            rec_ts = datetime.min.replace(tzinfo=timezone.utc)
+        if rec_ts > existing_ts:
+            by_mint[mint] = rec
+
+    if not by_mint:
+        print("No actionable dust swaps found.")
+        return
+
+    executed_ids: List[str] = []
+    failed_ids: List[str] = []
+    skipped_ids: List[str] = []
+
+    for mint, rec in by_mint.items():
+        signal = rec.get("signal", {})
+        signal_id = signal.get("signal_id")
+        print(f"Sweeping {signal_id} (mint={mint})...")
+        status, details = _handle_swap_to_usdc(signal, cfg, rails)
+        print(f"  {status}: {details}")
+        journal_append(
+            signal=signal,
+            decision=status,
+            details=details,
+            rails_hash=rails_hash(RAILS_PATH),
+        )
+        if status == "executed":
+            try:
+                trade_ledger.append_row(
+                    trade_ledger.build_row(signal, status, details, _now_utc_iso())
+                )
+            except Exception as exc:
+                print(f"[{utc_now()}] ledger row append failed: {exc}")
+            dust_queue.update_status(signal_id, "executed")
+            executed_ids.append(signal_id)
+        else:
+            dust_queue.update_status(signal_id, status)
+            failed_ids.append(signal_id)
+
+    # Mark older duplicate records as skipped.
+    for rec in records:
+        signal = rec.get("signal", {})
+        signal_id = signal.get("signal_id")
+        mint = signal.get("mint")
+        if signal_id in executed_ids or signal_id in failed_ids:
+            continue
+        if by_mint.get(mint) is not None and by_mint.get(mint, {}).get("signal", {}).get("signal_id") != signal_id:
+            dust_queue.update_status(signal_id, "skipped")
+            skipped_ids.append(signal_id)
+
+    print(f"\nSweep complete: executed={len(executed_ids)}, failed={len(failed_ids)}, skipped duplicates={len(skipped_ids)}")
+
+
 def do_check(cfg: Dict[str, Any]) -> None:
     print("Executor health check")
     print(f"  mode: {cfg.get('mode')}")
@@ -766,6 +917,7 @@ def main() -> None:
     parser.add_argument("--reject", metavar="SIGNAL_ID", help="Reject a pending approval")
     parser.add_argument("--list-approvals", action="store_true", help="List pending approvals")
     parser.add_argument("--list-dust-swaps", action="store_true", help="List swap_to_usdc signals pending review")
+    parser.add_argument("--sweep-dust-swaps", action="store_true", help="Execute pending dust swaps now (auto mode only)")
     parser.add_argument("--check", action="store_true", help="Health check")
     args = parser.parse_args()
 
@@ -783,6 +935,9 @@ def main() -> None:
         return
     if args.list_dust_swaps:
         do_list_dust_swaps()
+        return
+    if args.sweep_dust_swaps:
+        do_sweep_dust_swaps(cfg, rails)
         return
     if args.check:
         do_check(cfg)

@@ -74,6 +74,32 @@ Auto-pause means: **no new opens**, closes still allowed (de-risking is always p
 
 ---
 
+## 5b. Modify actions (`add_liquidity` / `remove_liquidity`)
+
+Added 2026-10-01. Both act on an **existing** position (`position_id` required).
+
+| Rail | Value | Meaning |
+|---|---|---|
+| `min_remove_bps` | **1** | Minimum partial removal (from `execution_guards` in `execution_limits.json`). |
+
+**`add_liquidity` rules:**
+- Signal must carry `position_id`, `pool_address`, `bin_range`, `liquidity {amount_x, amount_y}`, `position_usd`.
+- Guarded **like an open** (it deploys new capital): exposure, daily-loss, and drawdown rails apply; `max_position_usd` applies to tracked position value + add.
+- The signal's `bin_range` must contain the pool's live active bin, and the chain handler rejects any mismatch between the signal range and the position's on-chain bounds.
+- Range width obeys `max_meteora_range_width`.
+- `bps` field: n/a.
+
+**`remove_liquidity` rules:**
+- Signal must carry `position_id`, `pool_address`, `bps` (1–9999).
+- De-risking: exposure rails do **not** apply (same policy as close).
+- `bps >= 10000` is rejected — a full removal is `close`'s job (remove + claim + close atomically).
+- Optional `claim_fees: true` sweeps accrued fees after the removal (failure does not undo the removal).
+- A position with zero liquidity is rejected — use `claim` or `close`.
+
+**Exposure bookkeeping:** opens record `position_id` in `state/exposure_state.json`; adds grow the tracked `position_usd`, removes shrink it proportionally (`bps/10000`). Positions opened before 2026-10-01 have no `position_id` and are matched by pool address.
+
+---
+
 ## 6. Kill switch 🔴
 
 Create a file named **`KILL`** in the `agents/meteora-dlmm/` folder (or ask Jarvis to create it):

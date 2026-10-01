@@ -25,6 +25,18 @@ def build(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) ->
     if action == "open":
         req["bin_range"] = signal.get("bin_range")
         req["liquidity"] = signal.get("liquidity")
+    elif action == "add_liquidity":
+        if not signal.get("position_id"):
+            raise ValueError("meteora add_liquidity requires position_id")
+        req["position_id"] = signal["position_id"]
+        req["bin_range"] = signal.get("bin_range")
+        req["liquidity"] = signal.get("liquidity")
+    elif action == "remove_liquidity":
+        if not signal.get("position_id"):
+            raise ValueError("meteora remove_liquidity requires position_id")
+        req["position_id"] = signal["position_id"]
+        req["bps"] = int(signal["bps"])
+        req["claim_after"] = bool(signal.get("claim_fees", False))
     elif action in {"close", "claim"}:
         if not signal.get("position_id"):
             raise ValueError("meteora close/claim requires position_id")

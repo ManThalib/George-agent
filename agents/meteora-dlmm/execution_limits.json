@@ -1,31 +1,27 @@
 {
   "_comment": "George mechanical execution limits. This file is the single source of truth for the executor's hard rails. Sheldon reads it when building signals so strategy intent and execution limits stay in sync.",
-
   "position_sizing": {
     "max_position_usd": 100,
     "min_position_usd": 10
   },
-
   "exposure_and_loss": {
     "max_total_exposure_usd": 300,
     "max_open_positions": 3,
     "max_daily_loss_usd": 50,
     "max_drawdown_pct": 10
   },
-
   "circuit_breakers": {
     "pause_after_consecutive_failures": 3,
     "pause_on_rpc_error_streak": 5
   },
-
   "execution_guards": {
     "max_slippage_bps": 100,
     "max_price_impact_pct": 1.5,
     "priority_fee_cap_sol": 0.0005,
     "tx_timeout_seconds": 60,
-    "one_tx_at_a_time": true
+    "one_tx_at_a_time": true,
+    "min_remove_bps": 1
   },
-
   "range_limits": {
     "min_open_score": 70.0,
     "max_bin_range_width": 2000,
@@ -33,5 +29,6 @@
     "max_orca_range_width": 2000,
     "max_raydium_range_width": 2000,
     "reject_active_bin_out_of_range_open": true
-  }
+  },
+  "_comment_mutation": "add_liquidity deploys new capital and is guarded like an open (max_position_usd applies to tracked value + add, max_total_exposure_usd, max_daily_loss_usd, max_drawdown_pct). remove_liquidity is de-risking: always allowed, bps must be in [min_remove_bps, 9999]; bps>=10000 is a close."
 }

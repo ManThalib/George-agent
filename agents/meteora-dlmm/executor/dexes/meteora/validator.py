@@ -24,6 +24,9 @@ def _allowed_bin_steps(rails: Dict[str, Any]) -> List[int]:
 def validate(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Dict[str, Any]:
     signal = validate_core(signal, cfg, rails)
 
+    if signal.get("action") in {"add_liquidity", "remove_liquidity"}:
+        return validate_mutation(signal, cfg, rails)
+
     if signal.get("action") != "open":
         return signal
 
@@ -56,5 +59,29 @@ def validate(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any])
             f"pool bin_step {bin_step} not in allowed_bin_steps {allowed} "
             f"(minimum {min(allowed)}); refusing to open"
         )
+
+    return signal
+
+
+def validate_mutation(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Dict[str, Any]:
+    """Per-DEX checks for add_liquidity / remove_liquidity on Meteora.
+
+    Runs after common validate_core (which enforces required fields, the
+    remove bps rail, and the add live-tick guard).
+    """
+    action = signal.get("action")
+    if action not in {"add_liquidity", "remove_liquidity"}:
+        return signal
+
+    if action == "add_liquidity":
+        bin_range = signal.get("bin_range") or {}
+        lower = int(bin_range.get("lower", 0))
+        upper = int(bin_range.get("upper", 0))
+        width = upper - lower + 1
+        max_width = int(rails.get("max_meteora_range_width", 70))
+        if width > max_width:
+            raise SignalValidationError(
+                f"meteora add range width {width} (inclusive) exceeds rail {max_width}"
+            )
 
     return signal

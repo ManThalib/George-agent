@@ -29,6 +29,7 @@ DEFAULT_RAILS: Dict[str, Any] = {
     "pause_after_consecutive_failures": 3,
     "pause_on_rpc_error_streak": 5,
     "max_slippage_bps": 100,
+    "min_remove_bps": 1,
     "max_price_impact_pct": 1.5,
     "priority_fee_cap_sol": 0.0005,
     "tx_timeout_seconds": 60,

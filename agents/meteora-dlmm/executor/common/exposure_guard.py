@@ -13,7 +13,7 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 STATE_DIR = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/state")
@@ -126,9 +126,118 @@ def record_open_executed(signal: Dict[str, Any]) -> None:
     open_positions: List[Dict[str, Any]] = state.get("open_positions") or []
     open_positions.append({
         "pool_address": signal.get("pool_address"),
+        "position_id": signal.get("position_id"),
         "position_usd": float(signal.get("position_usd") or 0.0),
         "opened_at": datetime.now(timezone.utc).isoformat(),
     })
+    state["open_positions"] = open_positions
+    save_state(state)
+
+
+def _find_position(open_positions: List[Dict[str, Any]], signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Match a stored position entry by position_id, falling back to pool_address.
+
+    Entries opened before position_id tracking have no position_id; those
+    can only be addressed by pool (ambiguous only if the pool holds several).
+    """
+    position_id = signal.get("position_id")
+    pool_address = signal.get("pool_address")
+    if position_id:
+        for p in open_positions:
+            if p.get("position_id") == position_id:
+                return p
+    for p in open_positions:
+        if p.get("pool_address") == pool_address and not p.get("position_id"):
+            return p
+    return None
+
+
+def check_add_allowed(signal: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[bool, str]:
+    """Return (allowed, reason_or_empty) for an add_liquidity signal.
+
+    An add deploys new capital, so the loss/drawdown/exposure rails apply
+    like an open. max_open_positions is skipped (no new position), and the
+    per-position cap is checked against tracked value + add when the
+    position is tracked; untracked (pre-tracking) positions fall back to
+    checking the add alone against max_position_usd.
+    """
+    state = reset_daily_if_needed(load_state())
+
+    try:
+        add_usd = float(signal.get("position_usd"))
+    except (TypeError, ValueError):
+        return False, "position_usd missing or non-numeric; fail-closed"
+    if add_usd <= 0:
+        return False, f"add position_usd must be positive: {add_usd}"
+
+    max_pos = float(rails.get("max_position_usd", 100.0))
+    open_positions = state.get("open_positions") or []
+    tracked = _find_position(open_positions, signal)
+    base_usd = float(tracked.get("position_usd") or 0.0) if tracked else 0.0
+    if base_usd + add_usd > max_pos:
+        return False, (
+            f"position value after add ${base_usd + add_usd:.2f} > max_position_usd {max_pos:.2f}"
+        )
+
+    max_exposure = float(rails.get("max_total_exposure_usd", 300.0))
+    current_exposure = _total_exposure(open_positions)
+    if current_exposure + add_usd > max_exposure:
+        return False, (
+            f"exposure ${current_exposure + add_usd:.2f} > max "
+            f"${max_exposure:.2f}"
+        )
+
+    max_daily_loss = float(rails.get("max_daily_loss_usd", 50.0))
+    daily_loss = float(state.get("daily_loss_usd") or 0.0)
+    if daily_loss >= max_daily_loss:
+        return False, f"daily loss ${daily_loss:.2f} >= max ${max_daily_loss:.2f}"
+
+    max_drawdown = float(rails.get("max_drawdown_pct", 10.0))
+    dd = _drawdown_pct(state)
+    if dd >= max_drawdown:
+        return False, f"drawdown {dd:.2f}% >= max {max_drawdown:.2f}%"
+
+    return True, ""
+
+
+def record_add_executed(signal: Dict[str, Any]) -> None:
+    """Call after an add_liquidity transaction has been confirmed.
+
+    Grows the tracked position_usd (creating an entry when the position is
+    not yet tracked, e.g. opened before position_id tracking existed).
+    """
+    state = load_state()
+    open_positions: List[Dict[str, Any]] = state.get("open_positions") or []
+    add_usd = float(signal.get("position_usd") or 0.0)
+    tracked = _find_position(open_positions, signal)
+    if tracked is not None:
+        tracked["position_usd"] = float(tracked.get("position_usd") or 0.0) + add_usd
+        if signal.get("position_id") and not tracked.get("position_id"):
+            tracked["position_id"] = signal.get("position_id")
+    else:
+        open_positions.append({
+            "pool_address": signal.get("pool_address"),
+            "position_id": signal.get("position_id"),
+            "position_usd": add_usd,
+            "opened_at": datetime.now(timezone.utc).isoformat(),
+            "note": "created by add_liquidity on untracked position",
+        })
+    state["open_positions"] = open_positions
+    save_state(state)
+
+
+def record_remove_executed(signal: Dict[str, Any]) -> None:
+    """Call after a remove_liquidity transaction has been confirmed.
+
+    Shrinks the tracked position_usd proportionally to the removed bps. The
+    entry stays: the position account remains open on-chain until a close.
+    """
+    state = load_state()
+    open_positions: List[Dict[str, Any]] = state.get("open_positions") or []
+    bps = int(signal.get("bps") or 0)
+    tracked = _find_position(open_positions, signal)
+    if tracked is not None:
+        tracked["position_usd"] = float(tracked.get("position_usd") or 0.0) * (1.0 - bps / 10000.0)
     state["open_positions"] = open_positions
     save_state(state)
 

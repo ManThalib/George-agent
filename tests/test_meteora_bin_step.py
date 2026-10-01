@@ -39,6 +39,8 @@ def _open_signal(lower=-5322, upper=-5276, pool=INCIDENT_POOL):
         "side": "bidirectional",
         "bin_range": {"lower": lower, "upper": upper},
         "liquidity": {"amount_x": "1000", "amount_y": "1000"},
+        "position_usd": 50.0,
+        "score": 80.0,
         "max_slippage_bps": 100,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }

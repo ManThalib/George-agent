@@ -217,6 +217,7 @@ def build_row(signal: Dict[str, Any], decision: str, details: Dict[str, Any],
         "position_usd": signal.get("position_usd"),
         "score": signal.get("score"),
         "bin_range": signal.get("bin_range"),
+        "bps": signal.get("bps"),
         "verify_ok": (details.get("result") or {}).get("verify", {}).get("ok")
         if isinstance(details.get("result"), dict) else None,
         "amounts": {},

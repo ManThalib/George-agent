@@ -24,7 +24,7 @@ function validateRequest(req) {
   const missing = required.filter((k) => req[k] === undefined || req[k] === "");
   if (missing.length) throw new Error(`missing request fields: ${missing.join(", ")}`);
   if (!DEX_HANDLERS[req.dex]) throw new Error(`unsupported dex: ${req.dex}`);
-  if (!["open", "close", "claim", "swap"].includes(req.action)) throw new Error(`unsupported action: ${req.action}`);
+  if (!["open", "close", "claim", "swap", "add_liquidity", "remove_liquidity"].includes(req.action)) throw new Error(`unsupported action: ${req.action}`);
   if (!["simulate", "send"].includes(req.mode)) throw new Error(`mode must be simulate or send, got ${req.mode}`);
 }
 
@@ -67,6 +67,8 @@ async function main() {
     if (req.action === "open") result = await handler.openPosition(req, connection, wallet);
     else if (req.action === "close") result = await handler.closePosition(req, connection, wallet);
     else if (req.action === "claim") result = await handler.claimFees(req, connection, wallet);
+    else if (req.action === "add_liquidity") result = await handler.addLiquidity(req, connection, wallet);
+    else if (req.action === "remove_liquidity") result = await handler.removeLiquidity(req, connection, wallet);
     else if (req.action === "swap") result = await jupiter.swap(req, connection, wallet);
 
     respond({ ok: true, dex: req.dex, action: req.action, mode: req.mode, ...result }, () => {
