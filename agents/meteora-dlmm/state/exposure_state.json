@@ -1,5 +1,12 @@
 {
-  "open_positions": [],
+  "open_positions": [
+    {
+      "pool_address": "3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv",
+      "position_id": null,
+      "position_usd": 91.13019598188183,
+      "opened_at": "2026-10-02T22:44:33.908805+00:00"
+    }
+  ],
   "daily_loss_usd": 0.0,
   "max_daily_loss_usd": 0.0,
   "peak_portfolio_usd": 0.0,

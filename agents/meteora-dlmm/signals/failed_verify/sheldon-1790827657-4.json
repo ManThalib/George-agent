@@ -1,0 +1,20 @@
+{
+  "signal_id": "sheldon-1790827657-4",
+  "action": "open",
+  "dex": "meteora",
+  "pool_address": "BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y",
+  "side": "bidirectional",
+  "bin_range": {
+    "lower": -2156,
+    "upper": -2108
+  },
+  "liquidity": {
+    "amount_x": "122098658",
+    "amount_y": "14479248"
+  },
+  "position_usd": 28.952261234431603,
+  "score": 70.63,
+  "max_slippage_bps": 100,
+  "reason": "OPEN score=70.63 threshold=70.0 dex=meteora position_usd=28.95 center=-2132",
+  "created_at": "2026-10-01T12:07:37+08:00"
+}

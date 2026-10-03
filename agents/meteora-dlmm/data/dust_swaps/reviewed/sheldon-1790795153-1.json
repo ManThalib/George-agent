@@ -1,0 +1,18 @@
+{
+  "signal_id": "sheldon-1790795153-1",
+  "signal": {
+    "signal_id": "sheldon-1790795153-1",
+    "action": "swap_to_usdc",
+    "mint": "USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA",
+    "symbol": "",
+    "decimals": 6,
+    "amount_raw": "24015502",
+    "amount_ui": 24.015502,
+    "value_usd": 24.01765817109879,
+    "reason": "dust token: unknown valued $24.02 (threshold $1.0)",
+    "created_at": "2026-10-01T03:05:53+08:00"
+  },
+  "status": "skipped",
+  "queued_at": "2026-09-30T19:06:40.822337+00:00",
+  "reviewed_at": "2026-09-30T23:31:16.745430+00:00"
+}

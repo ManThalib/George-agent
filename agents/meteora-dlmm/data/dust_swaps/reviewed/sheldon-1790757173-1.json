@@ -12,6 +12,7 @@
     "reason": "dust token: unknown valued $2.63 (threshold $1.0)",
     "created_at": "2026-09-30T16:32:53+08:00"
   },
-  "status": "pending_review",
-  "queued_at": "2026-09-30T08:33:04.032712+00:00"
+  "status": "skipped",
+  "queued_at": "2026-09-30T08:33:04.032712+00:00",
+  "reviewed_at": "2026-09-30T23:31:16.741116+00:00"
 }
