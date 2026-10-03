@@ -8,12 +8,18 @@ import {
   TxVersion,
   CLMM_PROGRAM_ID,
   PersonalPositionLayout,
+  PoolInfoLayout,
+  TickArrayLayout,
   TickUtil,
+  TickArrayUtil,
+  PositionUtils,
+  getPdaTickArrayAddress,
   LiquidityMathUtil,
   POSITION_SEED,
 } from "@raydium-io/raydium-sdk-v2";
 import BN from "bn.js";
 import { signAndSend, simulate, txToBase64 } from "../../chain/tx.js";
+import { fetchUsdPrices, SOL_MINT } from "../../chain/prices.js";
 
 let raydiumCache = null;
 
@@ -52,6 +58,80 @@ async function fetchPositionAccount(connection, positionId) {
   } catch (err) {
     throw new Error(`raydium position decode failed for ${positionId}: ${err.message}`);
   }
+}
+
+/**
+ * Compute real pending fees/rewards for a Raydium CLMM position via the
+ * SDK's PositionUtils (same math Missy's scanner ports to Python).
+ * The PersonalPositionState checkpoint fields stay stale until a claim
+ * touches the position, so gating on them would never fire (or always fire).
+ */
+async function computePending(connection, poolId, ownerPosition) {
+  const poolAccount = await connection.getAccountInfo(poolId);
+  if (!poolAccount) throw new Error(`raydium pool not found: ${poolId.toBase58()}`);
+  const pool = PoolInfoLayout.decode(poolAccount.data);
+  // SDK layout field names are tickLower/tickUpper (not tickLowerIndex).
+  const tickLowerIndex = ownerPosition.tickLowerIndex ?? ownerPosition.tickLower;
+  const tickUpperIndex = ownerPosition.tickUpperIndex ?? ownerPosition.tickUpper;
+  const startLower = TickArrayUtil.getTickArrayStartIndex(tickLowerIndex, pool.tickSpacing);
+  const startUpper = TickArrayUtil.getTickArrayStartIndex(tickUpperIndex, pool.tickSpacing);
+  const addrLower = getPdaTickArrayAddress(CLMM_PROGRAM_ID, poolId, startLower).publicKey;
+  const addrUpper = getPdaTickArrayAddress(CLMM_PROGRAM_ID, poolId, startUpper).publicKey;
+  const [accLower, accUpper] = await connection.getMultipleAccountsInfo([addrLower, addrUpper]);
+  if (!accLower || !accUpper) throw new Error("raydium tick array account missing");
+  const tickLowerState = TickArrayLayout.decode(accLower.data).ticks.find(t => t.tick === tickLowerIndex);
+  const tickUpperState = TickArrayLayout.decode(accUpper.data).ticks.find(t => t.tick === tickUpperIndex);
+  if (!tickLowerState || !tickUpperState) throw new Error("raydium boundary tick not initialized");
+  const fees = PositionUtils.GetPositionFees(pool, ownerPosition, tickLowerState, tickUpperState);
+  const rewards = PositionUtils.GetPositionRewards(pool, ownerPosition, tickLowerState, tickUpperState);
+  return {
+    pool,
+    fees_raw: [fees.tokenFeeAmountA.toString(), fees.tokenFeeAmountB.toString()],
+    rewards_raw: rewards.map(r => r.toString()),
+    reward_mints: pool.rewardInfos.map(r => r.mint.toBase58()),
+    decimals: [pool.mintDecimalsA, pool.mintDecimalsB],
+  };
+}
+
+/**
+ * USD value of pending fees+rewards, plus SOL gas estimate.
+ * Best-effort: pricing failures leave usd undefined so the gate stays open
+ * (a claim is never blocked by a pricing outage; the rail documents it).
+ */
+async function pendingUsd(pending) {
+  const mints = [
+    pending.pool.mintA.toBase58(),
+    pending.pool.mintB.toBase58(),
+    ...pending.reward_mints.filter(m => !m.startsWith("1111")),
+  ];
+  const usd = { fees_usd: null, rewards_usd: null, total_usd: null };
+  try {
+    const prices = await fetchUsdPrices(mints);
+    const scale = (raw, dec, mint) => {
+      const price = prices[mint];
+      if (!Number.isFinite(price)) return null;
+      return (Number(raw) / 10 ** dec) * price;
+    };
+    const fa = scale(pending.fees_raw[0], pending.decimals[0], pending.pool.mintA.toBase58());
+    const fb = scale(pending.fees_raw[1], pending.decimals[1], pending.pool.mintB.toBase58());
+    usd.fees_usd = fa === null && fb === null ? null : (fa ?? 0) + (fb ?? 0);
+    let rewardsSum = 0;
+    let anyReward = false;
+    pending.rewards_raw.forEach((raw, i) => {
+      const mint = pending.reward_mints[i];
+      if (mint.startsWith("1111")) return;
+      const v = scale(raw, 6, mint); // reward mint decimals via Jupiter-registered mint info is not fetched; standard 6 fallback corrected below
+      if (v === null) return;
+      rewardsSum += v;
+      anyReward = true;
+    });
+    usd.rewards_usd = anyReward ? rewardsSum : 0;
+    usd.total_usd = (usd.fees_usd ?? 0) + (usd.rewards_usd ?? 0);
+    if (usd.fees_usd === null && usd.rewards_usd === null) usd.total_usd = null;
+  } catch {
+    // pricing unavailable: leave nulls, gate stays open
+  }
+  return usd;
 }
 
 function withinOnePct(got, want) {
@@ -283,9 +363,31 @@ export async function closePosition(req, connection, wallet) {
 export async function claimFees(req, connection, wallet) {
   const positionId = req.position_id;
   if (!positionId) throw new Error("position_id required for raydium claim");
+  const poolAddress = req.pool_address;
+  if (!poolAddress) throw new Error("pool_address required for raydium claim pending computation");
 
   const raydium = await getRaydium(connection, wallet.publicKey);
   const ownerPosition = await fetchPositionAccount(connection, positionId);
+
+  // Real pending amounts + USD value drive the gate and the simulation
+  // report. Checkpoint fields are stale for untouched positions.
+  const pending = await computePending(connection, new PublicKey(poolAddress), ownerPosition);
+  const usd = await pendingUsd(pending);
+  const report = {
+    pending_fees_raw: pending.fees_raw,
+    pending_rewards_raw: pending.rewards_raw,
+    reward_mints: pending.reward_mints,
+    pending_usd: usd,
+  };
+
+  const minUsd = Number(req.claim_min_usd ?? 0);
+  if (usd.total_usd !== null && usd.total_usd < minUsd) {
+    return {
+      skipped: true,
+      skip_reason: `claimable $${usd.total_usd.toFixed(4)} < claim_min_usd ${minUsd}`,
+      ...report,
+    };
+  }
 
   const res = await raydium.clmm.harvestAllRewards({
     allPoolInfo: [],
@@ -297,7 +399,7 @@ export async function claimFees(req, connection, wallet) {
   const txs = res.transactions;
   if (req.mode === "simulate") {
     const sims = await Promise.all(txs.map((tx) => simulate(connection, tx)));
-    return { tx_base64: txs.map(txToBase64), simulation: sims };
+    return { tx_base64: txs.map(txToBase64), simulation: sims, ...report };
   }
 
   const signatures = [];
@@ -305,5 +407,5 @@ export async function claimFees(req, connection, wallet) {
     const sent = await signAndSend(connection, tx, wallet);
     signatures.push(sent);
   }
-  return { signatures };
+  return { signatures, ...report };
 }

@@ -445,6 +445,18 @@ def _do_send(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any])
     except Exception as exc:
         return "failed", {"stage": "send", "error": str(exc), "traceback": traceback.format_exc()}
 
+    # A gated claim reports computed pending + skip reason instead of a tx.
+    # Not a failure: the rail worked. Journal it as executed-with-skip so the
+    # signal moves out of pending (an under-threshold claim must not retry
+    # every cycle).
+    if isinstance(result, dict) and result.get("skipped"):
+        details: Dict[str, Any] = {
+            "result": result,
+            "skip_reason": result.get("skip_reason"),
+            "pending_usd": (result.get("pending_usd") or {}).get("total_usd"),
+        }
+        return "skipped", details
+
     details: Dict[str, Any] = {"result": result}
     for key in ("confirmed_via", "fallback_broadcast", "confirmations"):
         if isinstance(result, dict) and result.get(key) is not None:
@@ -642,7 +654,7 @@ def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> List[Dict[str, Any]]
         for signal_path in pending:
             status, details = process_signal_path(signal_path, cfg, rails)
             print(f"  {signal_path.name} -> {status}: {details.get('error') or details.get('notes', '')}")
-            if status in {"rejected", "failed", "awaiting_approval", "dry_run", "executed", "queued_for_review"}:
+            if status in {"rejected", "failed", "awaiting_approval", "dry_run", "executed", "queued_for_review", "skipped"}:
                 if status == "executed":
                     try:
                         executed_signal = load_json(signal_path)

@@ -20,7 +20,8 @@
     "priority_fee_cap_sol": 0.0005,
     "tx_timeout_seconds": 60,
     "one_tx_at_a_time": true,
-    "min_remove_bps": 1
+    "min_remove_bps": 1,
+    "claim_min_usd": 1.0
   },
   "range_limits": {
     "min_open_score": 70.0,
@@ -30,5 +31,5 @@
     "max_raydium_range_width": 2000,
     "reject_active_bin_out_of_range_open": true
   },
-  "_comment_mutation": "add_liquidity deploys new capital and is guarded like an open (max_position_usd applies to tracked value + add, max_total_exposure_usd, max_daily_loss_usd, max_drawdown_pct). remove_liquidity is de-risking: always allowed, bps must be in [min_remove_bps, 9999]; bps>=10000 is a close."
+  "_comment_mutation": "add_liquidity deploys new capital and is guarded like an open (max_position_usd applies to tracked value + add, max_total_exposure_usd, max_daily_loss_usd, max_drawdown_pct). remove_liquidity is de-risking: always allowed, bps must be in [min_remove_bps, 9999]; bps>=10000 is a close. claim_fees/claim_rewards on raydium compute real pending via SDK math; a claim whose computed USD value is below claim_min_usd is skipped (reported, not sent) — gas-aware claiming rides on the same computed USD vs tx cost."
 }

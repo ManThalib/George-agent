@@ -20,6 +20,7 @@ def build(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) ->
         "priority_fee_cap_sol": rails.get("priority_fee_cap_sol", 0.0005),
         "pool_address": signal["pool_address"],
         "position_id": signal.get("position_id"),
+        "claim_min_usd": rails.get("claim_min_usd", 0),
     }
 
     if action == "open":
