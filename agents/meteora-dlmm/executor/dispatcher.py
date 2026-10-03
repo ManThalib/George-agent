@@ -38,6 +38,7 @@ from common.journal import append as journal_append
 from common.rails_loader import RAILS_PATH, load_rails
 from common.signal_validator import SignalValidationError, validate_core
 from common.chain_client import ChainError, simulate as chain_simulate, send as chain_send
+from common import mirror
 import common.approvals as approvals_store
 import common.dust_queue as dust_queue
 import common.exposure_guard as exposure_guard
@@ -431,6 +432,12 @@ def _do_send(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any])
 
     `process_signal()` is responsible for the one validation call; callers
     here must receive a validated signal and never re-validate.
+
+    Multi-wallet mirror: the incoming signal IS the MAIN leg. After it
+    completes, each registered mirror runs the same decision with its own
+    keypair and scaled capital. Mirror OPENs are gated on MAIN success;
+    mirror CLOSE/CLAIMs run regardless (de-risking both wallets) with any
+    divergence flagged as drift.
     """
     action = signal["action"]
     if action == "swap":
@@ -439,6 +446,19 @@ def _do_send(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any])
         dex = signal.get("dex") or "meteora"
         _dex_validate, dex_builder = _get_dex_module(dex)
         req = dex_builder.build(signal, cfg, rails)
+
+    # Multi-wallet registry: resolve the wallet_id to its registered public
+    # key. A mirror signal carrying an unregistered id (or a key mismatch)
+    # is rejected before any chain call — fail closed.
+    wallet_id = req.get("wallet_id") or "main"
+    registry = cfg.get("wallet_registry") or {"main": cfg["wallet_public_key"]}
+    registered = registry.get(wallet_id)
+    if not registered:
+        return "rejected", {
+            "stage": "wallet_registry",
+            "error": f"wallet_id '{wallet_id}' not registered in agent.config.json wallet.mirrors",
+        }
+    req["wallet_public_key"] = registered
 
     try:
         result = chain_send(req)
@@ -455,13 +475,92 @@ def _do_send(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any])
             "skip_reason": result.get("skip_reason"),
             "pending_usd": (result.get("pending_usd") or {}).get("total_usd"),
         }
+        # MAIN claim skipped by the rail: mirrors would claim nothing either,
+        # but record the divergence for the epilogue report.
+        mirror.record_leg(signal.get("signal_id", ""), wallet_id, action,
+                          "skipped", str(result.get("skip_reason", "")))
         return "skipped", details
 
     details: Dict[str, Any] = {"result": result}
     for key in ("confirmed_via", "fallback_broadcast", "confirmations"):
         if isinstance(result, dict) and result.get(key) is not None:
             details[key] = result[key]
+
+    mirror_legs = _run_mirror_legs(signal, wallet_id, main_status="executed", cfg=cfg, rails=rails)
+    if mirror_legs:
+        details["mirror_legs"] = mirror_legs
     return "executed", details
+
+
+def _run_mirror_legs(
+    signal: Dict[str, Any],
+    main_wallet_id: str,
+    main_status: str,
+    cfg: Dict[str, Any],
+    rails: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Run the mirror legs for a completed MAIN signal.
+
+    Gating (owner-approved design): mirror OPEN/add runs only when MAIN's
+    leg succeeded; mirror CLOSE/CLAIM runs regardless — de-risking a mirror
+    must not depend on MAIN's leg landing. Mirror failures on opens wait
+    for the next cycle + drift-flag; closes are drift-flagged for owner
+    attention. Zero capital decisions happen here — the leg is a structural
+    copy with scaled amounts.
+    """
+    if main_wallet_id != "main":
+        return []  # a mirror leg never spawns further mirrors
+    registry = cfg.get("wallet_registry") or {}
+    mirrors = mirror.mirror_wallet_ids(registry)
+    if not mirrors:
+        return []
+    if signal.get("action") not in mirror.MIRRORABLE_ACTIONS:
+        return []
+
+    capital = float(cfg.get("mirror_capital_fraction", 1.0) or 1.0)
+    legs: List[Dict[str, Any]] = []
+    gate_opens = main_status == "executed"
+    for wallet_id in mirrors:
+        leg_signal = mirror.build_mirror_signal(signal, wallet_id, capital)
+        if not leg_signal:
+            continue
+        open_like = leg_signal["action"] in {"open", "add_liquidity"}
+        if open_like and not gate_opens:
+            mirror.record_leg(
+                signal.get("signal_id", ""), wallet_id, leg_signal["action"],
+                "gated", f"main leg {main_status}; mirror open waits for next cycle",
+            )
+            mirror.record_drift(
+                signal.get("signal_id", ""), wallet_id, leg_signal["action"],
+                f"main leg {main_status}: mirror open deferred (next cycle decides)",
+            )
+            legs.append({"wallet_id": wallet_id, "status": "gated",
+                         "detail": "main leg not executed; open deferred"})
+            continue
+
+        _dex_validate, dex_builder = _get_dex_module(leg_signal.get("dex") or "meteora")
+        try:
+            leg_req = dex_builder.build(leg_signal, cfg, rails)
+            registered = registry.get(wallet_id)
+            leg_req["wallet_public_key"] = registered or leg_req["wallet_public_key"]
+            leg_result = chain_send(leg_req)
+            if isinstance(leg_result, dict) and leg_result.get("skipped"):
+                mirror.record_leg(signal.get("signal_id", ""), wallet_id,
+                                  leg_signal["action"], "skipped",
+                                  str(leg_result.get("skip_reason", "")))
+                legs.append({"wallet_id": wallet_id, "status": "skipped",
+                             "detail": leg_result.get("skip_reason")})
+                continue
+            mirror.record_leg(signal.get("signal_id", ""), wallet_id,
+                              leg_signal["action"], "executed")
+            legs.append({"wallet_id": wallet_id, "status": "executed"})
+        except Exception as exc:
+            mirror.record_leg(signal.get("signal_id", ""), wallet_id,
+                              leg_signal["action"], "failed", str(exc))
+            mirror.record_drift(signal.get("signal_id", ""), wallet_id,
+                                leg_signal["action"], f"leg failed: {exc}")
+            legs.append({"wallet_id": wallet_id, "status": "failed", "detail": str(exc)[:200]})
+    return legs
 
 
 def _sim_ok(sim: Any) -> bool:
@@ -625,8 +724,21 @@ def _expected_usdc_delta(executed: List[Dict[str, Any]]) -> Tuple[int, bool]:
 
 
 def _capital_epilogue(cfg: Dict[str, Any], executed: List[Dict[str, Any]]) -> None:
-    """After run_once releases the dispatcher lock: if a swap executed,
-    run the wallet rescan -> Sheldon re-entry -> follow-up chain."""
+    """After run_once releases the dispatcher lock: mirror-drift report, then
+    (if a swap executed) the wallet rescan -> Sheldon re-entry chain."""
+    drift = mirror.check_drift()
+    if drift:
+        lines = "; ".join(
+            f"{d['signal_id']} {d['action']} wallet={d['wallet_id']}: {d['reason']}"
+            for d in drift[:5]
+        )
+        print(f"[{utc_now()}] MIRROR DRIFT ({len(drift)}): {lines}")
+        _notify_owner(
+            f"MIRROR DRIFT ({len(drift)} unresolved): {lines}. "
+            "Mirror wallets diverged from MAIN — inspect journal/state/mirror_sync.json; "
+            "mirror opens auto-retry next cycle, closes need attention."
+        )
+
     swaps = [s for s in executed if s.get("action") == "swap"]
     if not swaps:
         return

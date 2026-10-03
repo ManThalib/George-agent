@@ -55,4 +55,25 @@ def load_config() -> Dict[str, Any]:
         "signal_max_age_seconds": cfg.get("analyst_feed", {}).get("signal_max_age_seconds", 300),
         "heartbeat_interval_seconds": cfg.get("analyst_feed", {}).get("heartbeat_interval_seconds", 60),
         "commitment": cfg.get("rpc", {}).get("commitment", "confirmed"),
+        "mirror_capital_fraction": float(cfg.get("wallet", {}).get("mirror_capital_fraction", 1.0)),
+        # Multi-wallet mirror: logical id -> public key. MAIN comes from
+        # wallet.public_key above; mirrors are registered under
+        # config wallet.mirrors = [{wallet_id, public_key}]. A signal's
+        # wallet_id must be in this registry or the request is rejected
+        # before any chain call (fail closed).
+        "wallet_registry": _wallet_registry(cfg, public_key),
     }
+
+
+def _wallet_registry(cfg: Dict[str, Any], main_public_key: str) -> Dict[str, str]:
+    """Build the wallet_id -> public key registry from agent.config.json."""
+    registry = {"main": main_public_key}
+    for entry in cfg.get("wallet", {}).get("mirrors") or []:
+        if not isinstance(entry, dict):
+            continue
+        wid = str(entry.get("wallet_id") or "").strip().lower()
+        pubkey = str(entry.get("public_key") or "").strip()
+        if not wid or not pubkey or wid == "main":
+            continue
+        registry[wid] = pubkey
+    return registry

@@ -72,12 +72,13 @@ def _drawdown_pct(state: Dict[str, Any]) -> float:
 def check_open_allowed(signal: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[bool, str]:
     """Return (allowed, reason_or_empty).
 
-    Checks:
+    Checks (scoped to the signal's wallet — mirror wallets have their own
+    position/exposure budgets; MAIN's usage must not consume a mirror's):
+      - per-wallet open_positions < max_open_positions
+      - per-wallet total_exposure + position_usd <= max_total_exposure_usd
       - position_usd inside [min_position_usd, max_position_usd]
-      - open_positions < max_open_positions
-      - total_exposure + position_usd <= max_total_exposure_usd
-      - daily_loss_usd < max_daily_loss_usd
-      - drawdown_pct < max_drawdown_pct
+      - daily_loss_usd < max_daily_loss_usd (global: losses are losses)
+      - drawdown_pct < max_drawdown_pct (global)
     """
     state = reset_daily_if_needed(load_state())
 
@@ -94,17 +95,21 @@ def check_open_allowed(signal: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[b
     if position_usd > max_pos:
         return False, f"position_usd {position_usd:.2f} > max {max_pos:.2f}"
 
-    open_positions = state.get("open_positions") or []
+    wallet_id = signal.get("wallet_id") or "main"
+    all_positions = state.get("open_positions") or []
+    open_positions = [
+        p for p in all_positions if (p.get("wallet_id") or "main") == wallet_id
+    ]
     max_open = int(rails.get("max_open_positions", 3))
     if len(open_positions) >= max_open:
-        return False, f"open positions {len(open_positions)} >= max {max_open}"
+        return False, f"open positions {len(open_positions)} >= max {max_open} (wallet {wallet_id})"
 
     max_exposure = float(rails.get("max_total_exposure_usd", 300.0))
     current_exposure = _total_exposure(open_positions)
     if current_exposure + position_usd > max_exposure:
         return False, (
             f"exposure ${current_exposure + position_usd:.2f} > max "
-            f"${max_exposure:.2f}"
+            f"${max_exposure:.2f} (wallet {wallet_id})"
         )
 
     max_daily_loss = float(rails.get("max_daily_loss_usd", 50.0))
@@ -127,6 +132,7 @@ def record_open_executed(signal: Dict[str, Any]) -> None:
     open_positions.append({
         "pool_address": signal.get("pool_address"),
         "position_id": signal.get("position_id"),
+        "wallet_id": signal.get("wallet_id") or "main",
         "position_usd": float(signal.get("position_usd") or 0.0),
         "opened_at": datetime.now(timezone.utc).isoformat(),
     })
@@ -251,7 +257,14 @@ def record_close_executed(signal: Dict[str, Any], realized_pnl_usd: float = 0.0)
     state = load_state()
     open_positions: List[Dict[str, Any]] = state.get("open_positions") or []
     pool_address = signal.get("pool_address")
-    open_positions = [p for p in open_positions if p.get("pool_address") != pool_address]
+    wallet_id = signal.get("wallet_id") or "main"
+    # Key on (wallet_id, pool): the same pool can be open on MAIN and a
+    # mirror; pool-only keys would collide and close both legs.
+    open_positions = [
+        p for p in open_positions
+        if not (p.get("pool_address") == pool_address
+                and (p.get("wallet_id") or "main") == wallet_id)
+    ]
     state["open_positions"] = open_positions
     if realized_pnl_usd < 0:
         state["daily_loss_usd"] = float(state.get("daily_loss_usd") or 0.0) - realized_pnl_usd

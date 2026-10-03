@@ -39,6 +39,31 @@ export async function readRequest() {
   return JSON.parse(raw);
 }
 
+/**
+ * Load the signing keypair for a logical wallet id.
+ *
+ * Multi-wallet mirror: MAIN uses SOLANA_AGENT_WALLET (existing behavior);
+ * any other wallet_id resolves SOLANA_WALLET_<ID-UPPERCASED> the same way.
+ * The dispatcher sets the env var for the leg before spawning this process.
+ * The public key must still match the request's wallet_public_key (checked
+ * by dispatch.js) — a registry misroute fails closed.
+ */
+export function loadKeypairForWallet(walletId) {
+  const id = (walletId || "main").trim().toLowerCase();
+  if (id === "main" || !id) return loadKeypair();
+  const envName = `SOLANA_WALLET_${id.replace(/[^A-Z0-9]/gi, "_").toUpperCase()}`;
+  const prev = process.env.SOLANA_AGENT_WALLET;
+  if (!process.env[envName]) {
+    throw new Error(`${envName} not set: no keypair registered for wallet '${id}'`);
+  }
+  process.env.SOLANA_AGENT_WALLET = process.env[envName];
+  try {
+    return loadKeypair();
+  } finally {
+    process.env.SOLANA_AGENT_WALLET = prev;
+  }
+}
+
 export function loadKeypair() {
   const raw = process.env.SOLANA_AGENT_WALLET?.trim();
   if (!raw) throw new Error("SOLANA_AGENT_WALLET not set");

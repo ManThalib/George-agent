@@ -19,6 +19,7 @@ def append(signal: dict, decision: str, details: dict, rails_hash: str) -> None:
         "signal_id": signal.get("signal_id"),
         "action": signal.get("action"),
         "dex": signal.get("dex"),
+        "wallet_id": signal.get("wallet_id") or "main",
         "pool_address": signal.get("pool_address"),
         "decision": decision,
         "details": details,

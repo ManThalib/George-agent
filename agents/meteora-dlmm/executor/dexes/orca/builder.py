@@ -16,6 +16,7 @@ def build(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) ->
         "fallback_rpc_urls": cfg.get("rpc_fallback_urls", []),
         "fallback_delay_seconds": cfg.get("rpc_fallback_delay_seconds", 15),
         "wallet_public_key": cfg["wallet_public_key"],
+        "wallet_id": signal.get("wallet_id") or "main",
         "max_slippage_bps": slippage,
         "priority_fee_cap_sol": rails.get("priority_fee_cap_sol", 0.0005),
         "pool_address": signal["pool_address"],

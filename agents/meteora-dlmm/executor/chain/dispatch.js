@@ -8,7 +8,7 @@
 
 import process from "node:process";
 import { Connection, PublicKey } from "@solana/web3.js";
-import { respond, respondError, readRequest, log, loadKeypair } from "./common.js";
+import { respond, respondError, readRequest, log, loadKeypair, loadKeypairForWallet } from "./common.js";
 import { configureSendFallbacks } from "./tx.js";
 import * as meteora from "../dexes/meteora/chain.js";
 import * as raydium from "../dexes/raydium/chain.js";
@@ -53,10 +53,10 @@ async function main() {
 
     let wallet;
     if (req.mode === "send") {
-      wallet = loadKeypair();
+      wallet = loadKeypairForWallet(req.wallet_id);
       const publicKey = new PublicKey(req.wallet_public_key);
       if (!publicKey.equals(wallet.publicKey)) {
-        throw new Error(`keypair public key ${wallet.publicKey.toBase58()} does not match configured wallet ${req.wallet_public_key}`);
+        throw new Error(`keypair public key ${wallet.publicKey.toBase58()} does not match configured wallet ${req.wallet_public_key} (wallet_id=${req.wallet_id || "main"})`);
       }
     } else {
       wallet = { publicKey: new PublicKey(req.wallet_public_key) };

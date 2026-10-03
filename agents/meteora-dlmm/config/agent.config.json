@@ -1,6 +1,5 @@
 {
   "_readme": "This is the ONLY place the executor reads its settings from. The agent re-reads this file before every transaction, so edits take effect on its next check without restarting it.",
-
   "agent": {
     "name": "dlmm-executor",
     "note": "Working name. Owner will rename later.",
@@ -12,7 +11,6 @@
     },
     "version": "0.1.0"
   },
-
   "wallet": {
     "public_key": "QNsxSBe2tHb7RSQYh6TUBUQA2wD93PvPP5Jg3qUxPvj",
     "_comment": "Public address — safe in files. Env var SOLANA_PUBLIC_WALLET overrides if set.",
@@ -21,9 +19,11 @@
       "secret_ref": "SOLANA_AGENT_WALLET",
       "how": "Say 'store the wallet key' in chat. Jarvis will request it via a masked secret prompt — the private key is never visible in chat, logs, or files.",
       "never": "Do NOT paste the private key into this file or into chat."
-    }
+    },
+    "mirrors": [],
+    "_mirrors_comment": "Multi-wallet mirror: [{wallet_id, public_key}]. A mirror follows MAIN's decisions with its own keypair (env SOLANA_WALLET_<ID>, stored in the secrets store) and its own capital. Empty = single-wallet (current behavior). Mirrors have no brain: no scoring, no independent policy.",
+    "mirror_capital_fraction": 1.0
   },
-
   "rpc": {
     "provider": "helius",
     "https_url": "",
@@ -31,18 +31,18 @@
     "_comment": "Set SOLANA_RPC_URL env var; falls back to this value.",
     "commitment": "confirmed",
     "timeout_seconds": 30,
-    "fallback_https_urls": ["https://api.mainnet-beta.solana.com"],
+    "fallback_https_urls": [
+      "https://api.mainnet-beta.solana.com"
+    ],
     "fallback_delay_seconds": 15,
     "_fallback_comment": "If the primary RPC accepts a send but the tx never confirms, the executor re-broadcasts the identical signed raw tx to these endpoints after fallback_delay_seconds, then keeps confirming via the primary. Identical tx = identical signature, so there is no double-land risk. Keyless endpoints only in this file; a second paid RPC goes through the SOLANA_RPC_FALLBACK_URLS env var (comma-separated) instead of here."
   },
-
   "analyst_feed": {
     "note": "Where signals come from: Sheldon (scoring evaluator) writes George-schema signal files into signals/pending/; the signal-wake doorbell notifies this agent when new files land.",
     "analyst_agent_id": "sheldon",
     "signal_max_age_seconds": 300,
     "heartbeat_interval_seconds": 60
   },
-
   "jupiter_routing": {
     "use_for_swap_legs": true,
     "note": "When opening/closing needs a token swap leg (position consists of one token), route via Jupiter with slippage capped by the rails."
