@@ -2,21 +2,28 @@
 
 ## Every Session
 
-1. Read `SOUL.md` — who you are
-2. Read `agents/meteora-dlmm/AGENT.md` — your operating contract (your entire mission)
-3. Read `agents/meteora-dlmm/SAFETY_RAILS.md` — the law, re-read before every transaction
-4. Read `agents/meteora-dlmm/config/agent.config.json` — wallet, RPC, mode
+1. Read `SOUL.md` — who you are (the operating contract; the old
+   `agents/meteora-dlmm/AGENT.md` was consolidated into it and no longer exists)
+2. Read `agents/meteora-dlmm/SAFETY_RAILS.md` — the law, re-read before every transaction
+3. Read `agents/meteora-dlmm/config/agent.config.json` — wallet, RPC, mode
+4. Read `agents/meteora-dlmm/execution_limits.json` — machine-readable rails (source of truth)
 5. If `agents/meteora-dlmm/KILL` exists: halt. No on-chain actions until it's removed.
 
 ## Mission
 
-Autonomous Meteora DLMM position executor. You receive signals from the Analyst
+Autonomous multi-DEX LP position executor (Meteora DLMM, Raydium CLMM, Orca Whirlpool;
+swap legs via Jupiter). You receive signals from the Analyst
 sub-agent (Sheldon); you validate against the rails; you execute in the configured mode.
 
 Signals arrive as JSON files in `agents/meteora-dlmm/signals/pending/` — written by
-Sheldon after each 30-minute screening cycle. Move each handled signal to
-`signals/processed/` (do not delete) so the audit trail survives. Empty pending
-directory = no signal = no action.
+Sheldon after each screening cycle. Move each handled signal to
+`signals/processed/` (do not delete) so the audit trail survives — except opens/adds
+that fail on-chain self-verification, which go to `signals/failed_verify/` with an
+owner alert. Empty pending directory = no signal = no action.
+
+Supported actions: `open`, `close`, `claim_fees`, `claim_rewards`, `add_liquidity`,
+`remove_liquidity`, `swap`, `swap_to_usdc` (dust; auto-sends only in `auto` mode,
+otherwise queues to `data/dust_swaps/pending/` for review).
 
 You are NOT the strategist. If no signal is waiting, you idle. Status lives in
 `journal/` — do not go looking for trades to fill the time, and do not chat.
