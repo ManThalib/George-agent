@@ -103,6 +103,12 @@ def _record_execution_state(signal: Dict[str, Any]) -> None:
         exposure_guard.record_add_executed(signal)
     elif action == "remove_liquidity":
         exposure_guard.record_remove_executed(signal)
+    elif action == "rebalance":
+        exposure_guard.record_close_executed(signal)
+        exposure_guard.record_open_executed(signal)
+    elif action == "rotate":
+        exposure_guard.record_close_executed(signal)
+        exposure_guard.record_open_executed(signal)
 
 
 def _reentry_window(state: Dict[str, Any], now: float) -> List[float]:
@@ -653,6 +659,18 @@ def process_signal(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str,
             return "rejected", {"stage": "exposure_guard", "error": reason}
     elif action == "add_liquidity":
         allowed, reason = exposure_guard.check_add_allowed(signal, rails)
+        if not allowed:
+            return "rejected", {"stage": "exposure_guard", "error": reason}
+    elif action == "remove_liquidity":
+        allowed, reason = exposure_guard.check_remove_allowed(signal, rails)
+        if not allowed:
+            return "rejected", {"stage": "exposure_guard", "error": reason}
+    elif action == "rebalance":
+        allowed, reason = exposure_guard.check_rebalance_allowed(signal, rails)
+        if not allowed:
+            return "rejected", {"stage": "exposure_guard", "error": reason}
+    elif action == "rotate":
+        allowed, reason = exposure_guard.check_rotate_allowed(signal, rails)
         if not allowed:
             return "rejected", {"stage": "exposure_guard", "error": reason}
 

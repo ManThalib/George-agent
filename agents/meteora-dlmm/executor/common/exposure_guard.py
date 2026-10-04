@@ -11,7 +11,7 @@ SAFETY_RAILS.md and execution_limits.json.
 
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -55,6 +55,32 @@ def reset_daily_if_needed(state: Dict[str, Any]) -> Dict[str, Any]:
         state["daily_loss_usd"] = 0.0
         state["last_reset_date"] = _today()
     return state
+
+
+def _mutation_cooldown_hours(rails: Dict[str, Any]) -> float:
+    return float(rails.get("mutation_cooldown_hours", 6.0))
+
+
+def _last_mutation_at(state: Dict[str, Any], position_id: str) -> Optional[datetime]:
+    last = (state.get("last_mutations") or {}).get(position_id)
+    if not isinstance(last, dict):
+        return None
+    try:
+        return datetime.fromisoformat(last.get("at") or "")
+    except (ValueError, TypeError):
+        return None
+
+
+def _record_mutation(state: Dict[str, Any], signal: Dict[str, Any]) -> None:
+    position_id = signal.get("position_id")
+    if not position_id:
+        return
+    if "last_mutations" not in state:
+        state["last_mutations"] = {}
+    state["last_mutations"][position_id] = {
+        "at": datetime.now(timezone.utc).isoformat(),
+        "action": signal.get("action"),
+    }
 
 
 def _total_exposure(open_positions: List[Dict[str, Any]]) -> float:
@@ -203,6 +229,26 @@ def check_add_allowed(signal: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[bo
     if dd >= max_drawdown:
         return False, f"drawdown {dd:.2f}% >= max {max_drawdown:.2f}%"
 
+    allowed, reason = _check_mutation_cooldown(signal, rails, state)
+    if not allowed:
+        return False, reason
+
+    return True, ""
+
+
+def _check_mutation_cooldown(signal: Dict[str, Any], rails: Dict[str, Any], state: Dict[str, Any]) -> Tuple[bool, str]:
+    position_id = signal.get("position_id")
+    if not position_id:
+        return True, ""
+    last_at = _last_mutation_at(state, position_id)
+    if last_at is None:
+        return True, ""
+    cooldown = _mutation_cooldown_hours(rails)
+    if (datetime.now(timezone.utc) - last_at).total_seconds() < cooldown * 3600:
+        return False, (
+            f"mutation cooldown active for {position_id}: last mutation at "
+            f"{last_at.isoformat()} < {cooldown}h ago"
+        )
     return True, ""
 
 
@@ -228,6 +274,7 @@ def record_add_executed(signal: Dict[str, Any]) -> None:
             "opened_at": datetime.now(timezone.utc).isoformat(),
             "note": "created by add_liquidity on untracked position",
         })
+    _record_mutation(state, signal)
     state["open_positions"] = open_positions
     save_state(state)
 
@@ -244,8 +291,106 @@ def record_remove_executed(signal: Dict[str, Any]) -> None:
     tracked = _find_position(open_positions, signal)
     if tracked is not None:
         tracked["position_usd"] = float(tracked.get("position_usd") or 0.0) * (1.0 - bps / 10000.0)
+    _record_mutation(state, signal)
     state["open_positions"] = open_positions
     save_state(state)
+
+
+def check_remove_allowed(signal: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[bool, str]:
+    """Return (allowed, reason_or_empty) for a remove_liquidity signal.
+
+    Removes are de-risking, so loss/drawdown/exposure rails do not apply.
+    We do enforce a minimum remaining position value (you cannot strip a
+    position below the minimum economic size) and the mutation cooldown.
+    """
+    state = reset_daily_if_needed(load_state())
+
+    try:
+        bps = int(signal.get("bps") or 0)
+    except (TypeError, ValueError):
+        return False, "remove_liquidity bps missing or non-integer"
+
+    position_usd = signal.get("position_usd")
+    if position_usd is not None:
+        try:
+            position_usd = float(position_usd)
+        except (TypeError, ValueError):
+            position_usd = None
+    if position_usd is not None:
+        remaining = position_usd * (1.0 - bps / 10000.0)
+        min_pos = float(rails.get("min_position_usd", 10.0))
+        if remaining < min_pos:
+            return False, (
+                f"remaining position value ${remaining:.2f} < min_position_usd {min_pos:.2f}"
+            )
+
+    allowed, reason = _check_mutation_cooldown(signal, rails, state)
+    if not allowed:
+        return False, reason
+
+    return True, ""
+
+
+def check_rebalance_allowed(signal: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[bool, str]:
+    """Return (allowed, reason_or_empty) for a rebalance signal.
+
+    A rebalance closes an existing range and reopens in a new range. Net
+    exposure change is new_position_usd - old_position_usd. The new size
+    must still fit within min/max_position_usd.
+    """
+    return _check_replace_position(signal, rails, "rebalance")
+
+
+def check_rotate_allowed(signal: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[bool, str]:
+    """Return (allowed, reason_or_empty) for a rotate signal.
+
+    A rotate closes one position and opens another in a different pool.
+    Exposure logic is the same as rebalance.
+    """
+    return _check_replace_position(signal, rails, "rotate")
+
+
+def _check_replace_position(signal: Dict[str, Any], rails: Dict[str, Any], action: str) -> Tuple[bool, str]:
+    state = reset_daily_if_needed(load_state())
+
+    try:
+        position_usd = float(signal.get("position_usd"))
+    except (TypeError, ValueError):
+        return False, f"{action} signal missing position_usd; cannot verify sizing rails"
+
+    min_pos = float(rails.get("min_position_usd", 10.0))
+    max_pos = float(rails.get("max_position_usd", 100.0))
+    if position_usd < min_pos:
+        return False, f"position_usd {position_usd:.2f} < min_position_usd {min_pos:.2f}"
+    if position_usd > max_pos:
+        return False, f"position_usd {position_usd:.2f} > max_position_usd {max_pos:.2f}"
+
+    max_exposure = float(rails.get("max_total_exposure_usd", 300.0))
+    open_positions = state.get("open_positions") or []
+    current_exposure = _total_exposure(open_positions)
+    tracked = _find_position(open_positions, signal)
+    old_value = float(tracked.get("position_usd") or 0.0) if tracked else 0.0
+    net_exposure = current_exposure - old_value + position_usd
+    if net_exposure > max_exposure:
+        return False, (
+            f"net exposure after {action} ${net_exposure:.2f} > max ${max_exposure:.2f}"
+        )
+
+    max_daily_loss = float(rails.get("max_daily_loss_usd", 50.0))
+    daily_loss = float(state.get("daily_loss_usd") or 0.0)
+    if daily_loss >= max_daily_loss:
+        return False, f"daily loss ${daily_loss:.2f} >= max ${max_daily_loss:.2f}"
+
+    max_drawdown = float(rails.get("max_drawdown_pct", 10.0))
+    dd = _drawdown_pct(state)
+    if dd >= max_drawdown:
+        return False, f"drawdown {dd:.2f}% >= max {max_drawdown:.2f}%"
+
+    allowed, reason = _check_mutation_cooldown(signal, rails, state)
+    if not allowed:
+        return False, reason
+
+    return True, ""
 
 
 def record_close_executed(signal: Dict[str, Any], realized_pnl_usd: float = 0.0) -> None:

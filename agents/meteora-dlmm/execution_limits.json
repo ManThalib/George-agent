@@ -21,10 +21,14 @@
     "tx_timeout_seconds": 60,
     "one_tx_at_a_time": true,
     "min_remove_bps": 1,
+    "partial_remove_bps_min": 2500,
+    "partial_remove_bps_max": 7500,
+    "mutation_cooldown_hours": 6,
     "claim_min_usd": 1.0
   },
   "range_limits": {
     "min_open_score": 70.0,
+    "min_open_score_adaptive_floor": 55.0,
     "max_bin_range_width": 2000,
     "max_meteora_range_width": 70,
     "max_orca_range_width": 2000,

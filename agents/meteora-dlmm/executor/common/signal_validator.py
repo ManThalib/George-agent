@@ -15,7 +15,7 @@ SUPPORTED_DEXES = {"meteora", "raydium", "orca"}
 REQUIRED_FIELDS = {"signal_id", "action", "created_at"}
 SWAP_REQUIRED_FIELDS = {"input_mint", "output_mint", "amount"}
 SWAP_TO_USDC_REQUIRED_FIELDS = {"mint", "symbol", "decimals", "amount_raw", "amount_ui", "value_usd", "reason"}
-VALID_ACTIONS = {"open", "close", "claim_fees", "claim_rewards", "swap", "swap_to_usdc", "add_liquidity", "remove_liquidity"}
+VALID_ACTIONS = {"open", "close", "claim_fees", "claim_rewards", "swap", "swap_to_usdc", "add_liquidity", "remove_liquidity", "rebalance", "rotate"}
 
 # Byte offset of the live current tick/bin (i32, little-endian, signed) in
 # each DEX's on-chain pool account. All three verified against live mainnet
@@ -115,6 +115,49 @@ def _check_swap(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, An
         raise SignalValidationError(f"max_slippage_bps {slippage_bps} > rail {rail_slippage}")
 
 
+def _check_side(signal: Dict[str, Any], action: str) -> None:
+    """Validate side declaration and liquidity consistency for mutations.
+
+    Accepts missing side for backwards compatibility (assumed bidirectional).
+    For explicit one-sided positions the supplied liquidity must match the
+    chosen side; a remove on the X side with non-zero Y bps, or vice versa,
+    is rejected because the chain instruction would act on the wrong token.
+    """
+    side = (signal.get("side") or "bidirectional").lower()
+    if side not in {"bidirectional", "x", "y"}:
+        raise SignalValidationError(
+            f"{action} side must be bidirectional, x, or y; got {side}"
+        )
+    liq = signal.get("liquidity") or {}
+    try:
+        amount_x = int(liq.get("amount_x", 0))
+    except (TypeError, ValueError):
+        amount_x = 0
+    try:
+        amount_y = int(liq.get("amount_y", 0))
+    except (TypeError, ValueError):
+        amount_y = 0
+    if side == "x" and amount_y != 0:
+        raise SignalValidationError(
+            f"{action} side=x but liquidity.amount_y is non-zero"
+        )
+    if side == "y" and amount_x != 0:
+        raise SignalValidationError(
+            f"{action} side=y but liquidity.amount_x is non-zero"
+        )
+    # For removes the bps applies to the chosen side; ensure one side is
+    # explicitly zero when side is x/y.
+    if action == "remove_liquidity":
+        if side == "x" and amount_x != 0:
+            raise SignalValidationError(
+                "remove_liquidity side=x but liquidity.amount_x is non-zero"
+            )
+        if side == "y" and amount_y != 0:
+            raise SignalValidationError(
+                "remove_liquidity side=y but liquidity.amount_y is non-zero"
+            )
+
+
 def _check_swap_to_usdc(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> None:
     mint = signal.get("mint")
     if not isinstance(mint, str) or len(mint) < 32:
@@ -179,6 +222,10 @@ def validate_core(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, 
             required |= {"position_id", "bin_range", "liquidity", "position_usd"}
         elif action == "remove_liquidity":
             required |= {"position_id", "bps"}
+        elif action == "rebalance":
+            required |= {"position_id", "bin_range", "liquidity", "position_usd"}
+        elif action == "rotate":
+            required |= {"position_id", "bin_range", "liquidity", "position_usd"}
 
     missing = required - set(signal.keys())
     if missing:
@@ -203,7 +250,7 @@ def validate_core(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, 
     if slippage_bps > rail_slippage:
         raise SignalValidationError(f"max_slippage_bps {slippage_bps} > rail {rail_slippage}")
 
-    if action in {"open", "add_liquidity"}:
+    if action in {"open", "add_liquidity", "rebalance", "rotate"}:
         bin_range = signal.get("bin_range") or {}
         lower = bin_range.get("lower")
         upper = bin_range.get("upper")
@@ -241,10 +288,10 @@ def validate_core(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, 
                 "the live price"
             )
 
-    if action in {"close", "claim_fees", "claim_rewards", "add_liquidity", "remove_liquidity"} and not signal.get("position_id"):
+    if action in {"close", "claim_fees", "claim_rewards", "add_liquidity", "remove_liquidity", "rebalance", "rotate"} and not signal.get("position_id"):
         raise SignalValidationError(f"{action} requires position_id")
 
-    if action == "add_liquidity":
+    if action in {"add_liquidity", "rebalance", "rotate"}:
         liq = signal.get("liquidity") or {}
         amounts: List[int] = []
         for key in ("amount_x", "amount_y"):
@@ -261,19 +308,25 @@ def validate_core(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, 
             amounts.append(value)
         if all(v == 0 for v in amounts):
             raise SignalValidationError(
-                "add_liquidity liquidity must include a positive amount_x or amount_y"
+                f"{action} liquidity must include a positive amount_x or amount_y"
             )
 
         try:
             add_usd = float(signal.get("position_usd"))
         except (TypeError, ValueError) as exc:
             raise SignalValidationError(
-                "add_liquidity signal missing position_usd; cannot verify exposure rails"
+                f"{action} signal missing position_usd; cannot verify exposure rails"
             ) from exc
         if add_usd <= 0:
             raise SignalValidationError(
-                f"add_liquidity position_usd must be positive: {add_usd}"
+                f"{action} position_usd must be positive: {add_usd}"
             )
+
+    # Side discipline: mutations of asymmetric positions must declare the
+    # side they target, and the supplied liquidity must be consistent with
+    # that side. Missing side on a mutation is accepted (legacy / symmetric).
+    if action in {"add_liquidity", "remove_liquidity", "rebalance", "rotate"}:
+        _check_side(signal, action)
 
     if action == "remove_liquidity":
         try:
@@ -291,6 +344,13 @@ def validate_core(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, 
             raise SignalValidationError(
                 "remove_liquidity bps must be < 10000; a full removal is close's job "
                 "(remove+claim+close atomically)"
+            )
+        partial_min = int(rails.get("partial_remove_bps_min", 2500))
+        partial_max = int(rails.get("partial_remove_bps_max", 7500))
+        if bps < partial_min or bps > partial_max:
+            raise SignalValidationError(
+                f"remove_liquidity bps {bps} outside partial-remove range "
+                f"[{partial_min}, {partial_max}]"
             )
 
     # Position sizing rails: Sheldon owns the policy, but George enforces it
@@ -317,16 +377,27 @@ def validate_core(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, 
         # Score floor: Sheldon owns the threshold value, George enforces it
         # fail-closed. An open without a score cannot prove it crossed the
         # threshold, so it is rejected (owner-confirmed policy).
-        min_score = float(rails.get("min_open_score", 70.0))
+        # Adaptive signals carry the threshold used by the producer;
+        # clamp to the executor's adaptive floor so a missing/buggy signal
+        # cannot open below a safe minimum.
+        adaptive_floor = float(rails.get("min_open_score_adaptive_floor", 55.0))
+        score_policy = signal.get("score_policy") or {}
+        threshold = score_policy.get("min_open_score")
+        try:
+            threshold = float(threshold)
+        except (TypeError, ValueError):
+            threshold = float(rails.get("min_open_score", 70.0))
+        threshold = max(threshold, adaptive_floor)
         try:
             score = float(signal.get("score"))
         except (TypeError, ValueError):
             raise SignalValidationError(
                 "open signal missing score; cannot verify min_open_score rail"
             ) from None
-        if score < min_score:
+        if score < threshold:
             raise SignalValidationError(
-                f"score {score} < min_open_score {min_score}"
+                f"score {score} < min_open_score {threshold} "
+                f"(adaptive_floor={adaptive_floor})"
             )
 
     return signal

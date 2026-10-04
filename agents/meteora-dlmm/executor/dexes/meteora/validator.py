@@ -24,7 +24,7 @@ def _allowed_bin_steps(rails: Dict[str, Any]) -> List[int]:
 def validate(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Dict[str, Any]:
     signal = validate_core(signal, cfg, rails)
 
-    if signal.get("action") in {"add_liquidity", "remove_liquidity"}:
+    if signal.get("action") in {"add_liquidity", "remove_liquidity", "rebalance", "rotate"}:
         return validate_mutation(signal, cfg, rails)
 
     if signal.get("action") != "open":
@@ -70,10 +70,10 @@ def validate_mutation(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[s
     remove bps rail, and the add live-tick guard).
     """
     action = signal.get("action")
-    if action not in {"add_liquidity", "remove_liquidity"}:
+    if action not in {"add_liquidity", "remove_liquidity", "rebalance", "rotate"}:
         return signal
 
-    if action == "add_liquidity":
+    if action in {"add_liquidity", "rebalance", "rotate"}:
         bin_range = signal.get("bin_range") or {}
         lower = int(bin_range.get("lower", 0))
         upper = int(bin_range.get("upper", 0))

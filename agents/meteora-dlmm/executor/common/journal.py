@@ -24,6 +24,8 @@ def append(signal: dict, decision: str, details: dict, rails_hash: str) -> None:
         "decision": decision,
         "details": details,
         "rails_hash": rails_hash,
+        "score_policy": signal.get("score_policy"),
+        "position_scoring_policy": signal.get("position_scoring_policy"),
     }
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry, default=str))
