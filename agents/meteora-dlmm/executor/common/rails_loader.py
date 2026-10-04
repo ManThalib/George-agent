@@ -94,10 +94,15 @@ def _load_sheldon_policy() -> Dict[str, Any]:
     if not isinstance(data, dict):
         return policy
 
+    scoring = data.get("scoring") or {}
     pool = data.get("pool_eligibility") or {}
     policy["min_pool_liquidity_usd"] = pool.get("min_pool_liquidity_usd")
     policy["min_24h_volume_usd"] = pool.get("min_24h_volume_usd")
-    policy["min_open_score"] = pool.get("min_open_score")
+    # min_open_score moved to the `scoring` block (Sheldon Phase 2, 2026-10-04).
+    # Read the new path first; fall back to the legacy path for older manifests.
+    policy["min_open_score"] = scoring.get("min_open_score",
+                                           pool.get("min_open_score"))
+    policy["scoring_source"] = scoring.get("source")
     policy["allowed_bin_steps"] = pool.get("allowed_bin_steps")
 
     sizing = data.get("position_sizing") or {}

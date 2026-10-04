@@ -225,6 +225,14 @@ class TestRailLoad(unittest.TestCase):
         # grep alone cannot detect a silent parse failure; assert the loader.
         self.assertEqual(int(load_rails().get("min_remove_bps", 0)), 1)
 
+    def test_min_open_score_loads_from_scoring_block(self):
+        # Sheldon Phase 2 moved min_open_score from pool_eligibility to the
+        # scoring block; the loader must follow or the executor silently
+        # falls back to DEFAULT_RAILS and drifts from the producer.
+        rails = load_rails()
+        self.assertEqual(float(rails.get("min_open_score", 0.0)), 70.0)
+        self.assertEqual(rails.get("scoring_source"), "missy")
+
 
 if __name__ == "__main__":
     unittest.main()
