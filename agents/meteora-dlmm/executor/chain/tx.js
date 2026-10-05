@@ -145,7 +145,9 @@ async function confirmSignedTx(connection, raw, signature, { blockhash, lastVali
               const statuses = await conn.getSignatureStatuses([signature], { searchTransactionHistory: false });
               const st = statuses?.value?.[0];
               if (st && ["confirmed", "finalized"].includes(st.confirmationStatus)) {
-                resolveWatchdog({ slot: st.slot ?? null });
+                // A confirmed-but-failed tx is still a confirmed tx: surface
+                // the on-chain error instead of reporting success.
+                resolveWatchdog({ slot: st.slot ?? null, err: st.err ?? null });
                 return;
               }
               break;
@@ -167,6 +169,17 @@ async function confirmSignedTx(connection, raw, signature, { blockhash, lastVali
     watchdogStop = true;
     confirmPromise.catch(() => {});
     const slot = winner.ctx?.context?.slot ?? winner.ctx?.slot ?? lastValidBlockHeight;
+    const chainErr = winner.src === "primary-confirm"
+      ? winner.ctx?.value?.err ?? null
+      : winner.ctx?.err ?? null;
+    if (chainErr) {
+      const err = new Error(`transaction ${signature} failed on-chain: ${JSON.stringify(chainErr)}`);
+      err.signature = signature;
+      err.slot = slot;
+      err.chain_error = chainErr;
+      if (results.length) err.fallback_broadcast = results;
+      throw err;
+    }
     const out = { signature, slot, confirmed_via: winner.src };
     if (results.length) out.fallback_broadcast = results;
     return out;
