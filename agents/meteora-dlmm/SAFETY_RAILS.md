@@ -79,7 +79,7 @@ is required for `close`, `claim_fees`, `claim_rewards`, `add_liquidity`, and
 | `max_meteora_range_width` | **70** | Meteora `initializePositionAndAddLiquidityByStrategy` can only create ~70 bins in one transaction; this rail overrides `max_bin_range_width` for Meteora. |
 | `max_orca_range_width` | **2000** | Orca Whirlpool range-width cap. |
 | `max_raydium_range_width` | **2000** | Raydium CLMM range-width cap. |
-| `allowed_bin_steps` | **[10, 20, 25, 50, 100]** | Meteora pool `bin_step` whitelist. Read from the pool's live on-chain account (never from signal metadata); fail-closed when the fetch fails. (Strategy source: Sheldon policy `pool_eligibility.allowed_bin_steps`.) |
+| `allowed_bin_steps` | **[4, 10, 20, 25, 50, 100]** | Meteora pool `bin_step` whitelist. Read from the pool's live on-chain account (never from signal metadata); fail-closed when the fetch fails. (Strategy source: Sheldon policy `pool_eligibility.allowed_bin_steps`.) |
 | `reject_active_bin_out_of_range_open` | **true** | Don't open if price already outside the requested range. |
 
 **CLOSE actions bypass this section** — closing is de-risking and is always allowed (subject to mode + kill switch).

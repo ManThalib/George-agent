@@ -1,5 +1,5 @@
 """Tests for the Meteora bin-step rail: no opens on pools whose on-chain
-bin_step is not in SAFETY_RAILS.md `allowed_bin_steps` (min 10).
+bin_step is not in SAFETY_RAILS.md `allowed_bin_steps`.
 
 Incident: a live position was opened on pool 5rCf1DM8LjKTw4YqhnoLcngyZYeNnQq
 ztScTogYHAS6 (SOL-USDC, bin_step 4) — the rail was declared but never
@@ -26,7 +26,7 @@ CFG = {"signal_max_age_seconds": 300, "rpc_https_url": "https://rpc.test"}
 RAILS = {
     "max_slippage_bps": 100,
     "max_meteora_range_width": 70,
-    "allowed_bin_steps": [10, 20, 25, 50, 100],
+    "allowed_bin_steps": [4, 10, 20, 25, 50, 100],
 }
 
 
@@ -55,11 +55,17 @@ class MeteoraBinStepRailTests(unittest.TestCase):
 
     @patch("common.signal_validator.fetch_pool_current_tick", return_value=-5299)
     @patch("common.signal_validator.fetch_pool_bin_step", return_value=4)
-    def test_bin_step_4_rejected(self, _step, _tick):
+    def test_bin_step_4_passes(self, _step, _tick):
+        signal = _validate(_open_signal())
+        self.assertEqual(signal["action"], "open")
+
+    @patch("common.signal_validator.fetch_pool_current_tick", return_value=-5299)
+    @patch("common.signal_validator.fetch_pool_bin_step", return_value=125)
+    def test_bin_step_125_rejected(self, _step, _tick):
         with self.assertRaises(SignalValidationError) as ctx:
             _validate(_open_signal())
         self.assertIn("not in allowed_bin_steps", str(ctx.exception))
-        self.assertIn("4", str(ctx.exception))
+        self.assertIn("125", str(ctx.exception))
 
     @patch("common.signal_validator.fetch_pool_current_tick", return_value=-5299)
     @patch("common.signal_validator.fetch_pool_bin_step", return_value=10)
@@ -201,7 +207,7 @@ class RailsLoaderListParsingTests(unittest.TestCase):
         from common.rails_loader import RAILS_PATH, _parse_markdown_rails
 
         rails = _parse_markdown_rails(RAILS_PATH)
-        self.assertEqual(rails["allowed_bin_steps"], [10, 20, 25, 50, 100])
+        self.assertEqual(rails["allowed_bin_steps"], [4, 10, 20, 25, 50, 100])
 
     def test_parse_int_list_formats(self):
         from common.rails_loader import _parse_int_list
