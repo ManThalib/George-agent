@@ -183,27 +183,51 @@ def _save_reentry_state(state: Dict[str, Any]) -> None:
         print(f"[{utc_now()}] capital re-entry state save failed: {exc}")
 
 
-def _read_latest_usdc_raw() -> Optional[int]:
-    """USDC raw balance from the newest wallet scan (verification only)."""
-    scans = sorted(
-        p for p in os.listdir(WALLET_SCAN_DIR)
+def _newest_wallet_scan_path() -> Optional[str]:
+    """Newest wallet scan by mtime (not filename).
+
+    Sorting by filename always resolves wallet_screen-latest.json, so a
+    refresh that wrote a new timestamped file but did not (yet) move the
+    symlink would be invisible. mtime sees the real newest scan.
+    """
+    if not os.path.isdir(WALLET_SCAN_DIR):
+        return None
+    scans = [
+        os.path.join(WALLET_SCAN_DIR, p) for p in os.listdir(WALLET_SCAN_DIR)
         if p.startswith("wallet_screen-") and p.endswith(".json")
-    ) if os.path.isdir(WALLET_SCAN_DIR) else []
+        and not p.endswith((".failed", ".invalid"))
+    ]
     if not scans:
         return None
-    path = os.path.join(WALLET_SCAN_DIR, scans[-1])  # latest.json sorts last
+    return max(scans, key=os.path.getmtime)
+
+
+def _read_usdc_scan() -> Tuple[Optional[int], Optional[str], float]:
+    """(USDC raw balance, scan path, scan mtime) from the newest scan by mtime."""
+    path = _newest_wallet_scan_path()
+    if not path:
+        return None, None, 0.0
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = 0.0
     try:
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
     except Exception:
-        return None
+        return None, path, mtime
     for a in data.get("assets", []):
         if a.get("mint") == USDC_MINT:
             try:
-                return int(a.get("amount_raw") or 0)
+                return int(a.get("amount_raw") or 0), path, mtime
             except (TypeError, ValueError):
-                return None
-    return 0
+                return None, path, mtime
+    return 0, path, mtime
+
+
+def _read_latest_usdc_raw() -> Optional[int]:
+    """USDC raw balance from the newest wallet scan (verification only)."""
+    return _read_usdc_scan()[0]
 
 
 def _run_wallet_refresh(cfg: Dict[str, Any], expected_usdc_delta: int = 0,
@@ -213,7 +237,7 @@ def _run_wallet_refresh(cfg: Dict[str, Any], expected_usdc_delta: int = 0,
     if not rpc or not wallet:
         return "skipped (missing rpc_https_url / wallet_public_key in config)"
     env = {**os.environ, "SOLANA_RPC_URL": rpc, "WALLET_PUBLIC_KEY": wallet}
-    pre = _read_latest_usdc_raw()
+    pre, pre_path, pre_mtime = _read_usdc_scan()
     last_out = ""
     cur: Optional[int] = pre
     for attempt in range(4):
@@ -230,14 +254,25 @@ def _run_wallet_refresh(cfg: Dict[str, Any], expected_usdc_delta: int = 0,
             tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:] or ["no output"]
             return f"FAILED exit={proc.returncode}: {tail[0][:160]}"
         last_out = (proc.stdout or "").strip().splitlines()[-1:]
-        cur = _read_latest_usdc_raw()
+        cur, cur_path, cur_mtime = _read_usdc_scan()
         if cur is None or pre is None:
             return f"ok -> {last_out[0] if last_out else ''}"
+        # A refresh that did not produce a new scan cannot verify anything:
+        # reporting "delta unverified" here was a false negative.
+        if cur_path == pre_path and cur_mtime <= pre_mtime:
+            if attempt < 3:
+                time.sleep(6)  # let the refresh land a new scan
+                continue
+            name = os.path.basename(pre_path or "scan")
+            return (f"ok (scan not refreshed: {name} unchanged) "
+                    f"-> {last_out[0] if last_out else ''}")
+        # A new scan landed. Only now can the USDC delta be asserted.
+        if ambiguous:
+            return (f"ok (usdc {pre} -> {cur}; ambiguous batch, delta not asserted) "
+                    f"-> {last_out[0] if last_out else ''}")
         if expected_usdc_delta < 0 and cur <= pre + int(expected_usdc_delta * 0.9):
             return f"ok (usdc {pre} -> {cur}) -> {last_out[0] if last_out else ''}"
         if expected_usdc_delta > 0 and cur >= pre + int(expected_usdc_delta * 0.9):
-            return f"ok (usdc {pre} -> {cur}) -> {last_out[0] if last_out else ''}"
-        if ambiguous and cur != pre:
             return f"ok (usdc {pre} -> {cur}) -> {last_out[0] if last_out else ''}"
         if expected_usdc_delta == 0:
             return f"ok -> {last_out[0] if last_out else ''}"
