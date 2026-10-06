@@ -93,12 +93,18 @@ def _dispatcher_lock(timeout_seconds: int = 600):
 
 
 def _record_execution_state(signal: Dict[str, Any]) -> None:
-    """Update persistent execution state after a successful on-chain tx."""
+    """Update persistent execution state after a successful on-chain tx.
+
+    Wrapped by the callers so a guard failure can never mask an executed tx.
+    """
     action = signal.get("action")
     if action == "open":
         exposure_guard.record_open_executed(signal)
-    elif action in {"close", "claim_fees"}:
+    elif action in {"close"}:
         exposure_guard.record_close_executed(signal)
+    elif action in exposure_guard.CLAIM_ACTIONS:
+        # A fee claim is not a close: it must not remove the position.
+        exposure_guard.record_claim_executed(signal)
     elif action == "add_liquidity":
         exposure_guard.record_add_executed(signal)
     elif action == "remove_liquidity":
@@ -109,6 +115,39 @@ def _record_execution_state(signal: Dict[str, Any]) -> None:
     elif action == "rotate":
         exposure_guard.record_close_executed(signal)
         exposure_guard.record_open_executed(signal)
+
+
+def _safe_record_execution_state(signal: Dict[str, Any]) -> None:
+    """Record execution state; never let a guard failure mask the result."""
+    try:
+        _record_execution_state(signal)
+    except Exception as exc:
+        print(f"[{utc_now()}] exposure state record failed: {exc}")
+
+
+def _reconcile_exposure() -> None:
+    """Add on-chain positions missing from the tracked exposure state.
+
+    Runs once per run_once. Additive and conservative (see
+    exposure_guard.reconcile_positions); a stale scan is skipped. Never
+    raises: reconciliation is a safety net, not a gate.
+    """
+    try:
+        positions, mtime = exposure_guard.load_scan_positions()
+        report = exposure_guard.reconcile_positions(positions, scan_mtime=mtime)
+        if report.get("skipped"):
+            print(f"[{utc_now()}] exposure reconcile skipped: {report['skipped']}")
+            return
+        for entry in report.get("added") or []:
+            print(f"[{utc_now()}] exposure reconcile added "
+                  f"{entry.get('pool_address')} (wallet {entry.get('wallet_id')}, "
+                  f"${entry.get('position_usd')})")
+        for entry in report.get("unmatched") or []:
+            print(f"[{utc_now()}] exposure reconcile: tracked position "
+                  f"{entry.get('pool_address')} absent from scan (kept; needs a "
+                  f"confirmed close to remove)")
+    except Exception as exc:
+        print(f"[{utc_now()}] exposure reconcile failed: {exc}")
 
 
 def _reentry_window(state: Dict[str, Any], now: float) -> List[float]:
@@ -775,6 +814,10 @@ def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> List[Dict[str, Any]]
             print(f"[{utc_now()}] KILL file present; halting.")
             return executed
 
+        # Keep exposure state aligned with the authoritative on-chain scan
+        # before evaluating any new signal (additive; stale scan is skipped).
+        _reconcile_exposure()
+
         pending = _iter_pending()
         if not pending:
             print(f"[{utc_now()}] No pending signals.")
@@ -801,7 +844,7 @@ def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> List[Dict[str, Any]]
                 except Exception:
                     processed_signal = {"signal_id": signal_path.stem}
                 executed.append(processed_signal)
-                _record_execution_state(processed_signal)
+                _safe_record_execution_state(processed_signal)
     return executed
 
 
@@ -887,6 +930,9 @@ def do_approve(signal_id: str, cfg: Dict[str, Any], rails: Dict[str, Any]) -> No
         expected = -amt if signal.get("input_mint") == USDC_MINT else 0
         ambiguous = signal.get("output_mint") == USDC_MINT
         _trigger_capital_refresh(cfg, signal_id, expected, ambiguous)
+    if decision == "executed":
+        # The approval path must update exposure state too, not just run_once.
+        _safe_record_execution_state(signal)
     print(f"{signal_id} -> {decision}: {details}")
     if decision == "executed":
         verify = _self_verify_block(details)

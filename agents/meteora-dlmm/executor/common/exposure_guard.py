@@ -19,15 +19,25 @@ from typing import Any, Dict, List, Optional, Tuple
 STATE_DIR = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/state")
 STATE_PATH = STATE_DIR / "exposure_state.json"
 
+# Missy's authoritative position scans (newest-by-mtime).
+POSITION_SCAN_DIR = "/data/missy-data/position_scans"
+
+# A position scan older than this is not trusted for reconciliation: acting
+# on stale scan data would mis-count exposure in either direction.
+MAX_SCAN_AGE_SECONDS = 7200.0
+
+# Actions that collect fees without closing the position.
+CLAIM_ACTIONS = {"claim_fees", "claim_rewards"}
+
 
 def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-def load_state() -> Dict[str, Any]:
+def load_state(path: Optional[Path] = None) -> Dict[str, Any]:
     """Return the current guard state, defaulting to a fresh empty state."""
     try:
-        with open(STATE_PATH, "r", encoding="utf-8") as fh:
+        with open(path or STATE_PATH, "r", encoding="utf-8") as fh:
             state = json.load(fh)
         if isinstance(state, dict):
             return state
@@ -43,9 +53,10 @@ def load_state() -> Dict[str, Any]:
     }
 
 
-def save_state(state: Dict[str, Any]) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    with open(STATE_PATH, "w", encoding="utf-8") as fh:
+def save_state(state: Dict[str, Any], path: Optional[Path] = None) -> None:
+    target = Path(path) if path else STATE_PATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with open(target, "w", encoding="utf-8") as fh:
         json.dump(state, fh, indent=2)
 
 
@@ -414,3 +425,165 @@ def record_close_executed(signal: Dict[str, Any], realized_pnl_usd: float = 0.0)
     if realized_pnl_usd < 0:
         state["daily_loss_usd"] = float(state.get("daily_loss_usd") or 0.0) - realized_pnl_usd
     save_state(state)
+
+
+def record_claim_executed(signal: Dict[str, Any],
+                          path: Optional[Path] = None) -> None:
+    """Call after a CLAIM (claim_fees/claim_rewards) has been confirmed.
+
+    A fee claim does NOT close the position: the LP account stays open
+    on-chain. This must not remove the position from open_positions — doing
+    so under-counts exposure and leaves the open/exposure rails unenforced
+    (the historical bug: `claim_fees` was routed to record_close_executed).
+
+    The claim is recorded for observability only; it deliberately does NOT
+    stamp the mutation cooldown, so a routine claim cannot block a later
+    add/rebalance.
+    """
+    state = load_state(path)
+    position_id = signal.get("position_id")
+    key = str(position_id or signal.get("pool_address") or "unknown")
+    state.setdefault("last_claims", {})[key] = {
+        "at": datetime.now(timezone.utc).isoformat(),
+        "action": signal.get("action"),
+        "pool_address": signal.get("pool_address"),
+        "wallet_id": signal.get("wallet_id") or "main",
+    }
+    save_state(state, path)
+
+
+def load_scan_positions(positions_dir: Optional[str] = None,
+                        prefix: str = "position_scan") -> Tuple[List[Dict[str, Any]], float]:
+    """Newest Missy position scan as (non-closed positions, scan mtime).
+
+    Selection is by mtime, not filename, so parallel scan families are
+    ordered by freshness. Returns ([], 0.0) when no scan is readable.
+    """
+    import glob
+
+    directory = positions_dir or POSITION_SCAN_DIR
+    paths = sorted(
+        (p for p in glob.glob(os.path.join(directory, prefix + "-*.json"))
+         if not p.endswith((".failed", ".invalid"))),
+        key=os.path.getmtime,
+    )
+    if not paths:
+        return [], 0.0
+    path = paths[-1]
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return [], 0.0
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = 0.0
+    positions = data.get("positions", []) if isinstance(data, dict) else data
+    if not isinstance(positions, list):
+        return [], mtime
+    return [p for p in positions
+            if isinstance(p, dict) and p.get("pool_address")
+            and p.get("status") != "closed"], mtime
+
+
+def _scan_key(position: Dict[str, Any]) -> Tuple[str, str]:
+    """(wallet_id, pool_address) identity for a scan or tracked position."""
+    return (str(position.get("wallet_id") or "main"),
+            str(position.get("pool_address") or ""))
+
+
+def reconcile_positions(scan_positions: List[Dict[str, Any]],
+                        scan_mtime: float = 0.0,
+                        now: Optional[float] = None,
+                        max_age_seconds: float = MAX_SCAN_AGE_SECONDS,
+                        state_dir: Optional[str] = None,
+                        dry_run: bool = False) -> Dict[str, Any]:
+    """Add on-chain positions missing from the tracked exposure state.
+
+    Additive and conservative by design:
+      - A non-closed position present in the authoritative scan but absent
+        from open_positions is ADDED (the rails must count it).
+      - A tracked position absent from the scan is reported as 'unmatched'
+        and LEFT IN PLACE. Removing it without a confirmed close would
+        loosen the rails — exactly the defect this reconciliation fixes.
+
+    A stale scan is refused (skipped) so a lagging scan cannot mis-count.
+    Returns a report dict describing every change (for logging).
+    """
+    now = now if now is not None else datetime.now(timezone.utc).timestamp()
+    report: Dict[str, Any] = {
+        "skipped": None, "added": [], "unmatched": [],
+        "scan_size": len(scan_positions or []), "scan_mtime": scan_mtime,
+    }
+    if scan_mtime and max_age_seconds and now - scan_mtime > max_age_seconds:
+        report["skipped"] = (f"position scan stale "
+                             f"(age {now - scan_mtime:.0f}s > {max_age_seconds:.0f}s)")
+        return report
+    if not scan_positions:
+        report["skipped"] = "no positions in scan"
+        return report
+
+    path = Path(state_dir) / "exposure_state.json" if state_dir else None
+    state = load_state(path)
+    open_positions: List[Dict[str, Any]] = list(state.get("open_positions") or [])
+    tracked = {_scan_key(p) for p in open_positions}
+
+    for pos in scan_positions:
+        key = _scan_key(pos)
+        if key in tracked:
+            continue
+        entry = {
+            "pool_address": pos.get("pool_address"),
+            "position_id": pos.get("position_id"),
+            "wallet_id": pos.get("wallet_id") or "main",
+            "position_usd": float(pos.get("position_usd") or 0.0),
+            "opened_at": pos.get("opened_at") or datetime.now(timezone.utc).isoformat(),
+            "source": "reconcile",
+        }
+        open_positions.append(entry)
+        tracked.add(key)
+        report["added"].append(entry)
+
+    scan_keys = {_scan_key(p) for p in scan_positions}
+    for p in open_positions:
+        if _scan_key(p) not in scan_keys:
+            report["unmatched"].append({
+                "pool_address": p.get("pool_address"),
+                "wallet_id": p.get("wallet_id") or "main",
+                "position_usd": p.get("position_usd"),
+            })
+
+    if report["added"] and not dry_run:
+        state["open_positions"] = open_positions
+        save_state(state, path)
+    return report
+
+
+def backfill_from_scan(scan_positions: List[Dict[str, Any]],
+                       state_dir: Optional[str] = None,
+                       dry_run: bool = True) -> Dict[str, Any]:
+    """One-time migration: rebuild open_positions from the authoritative scan.
+
+    Unlike reconcile_positions (additive, keeps unmatched entries), this
+    REPLACES open_positions with the scan's non-closed positions. Use it
+    once, with a fresh scan, to clear a stale/legacy state file. Preserves
+    the daily counters and last_mutations.
+
+    ``dry_run=True`` (default) returns the proposed state without writing.
+    """
+    entries = [{
+        "pool_address": p.get("pool_address"),
+        "position_id": p.get("position_id"),
+        "wallet_id": p.get("wallet_id") or "main",
+        "position_usd": float(p.get("position_usd") or 0.0),
+        "opened_at": p.get("opened_at") or datetime.now(timezone.utc).isoformat(),
+        "source": "backfill",
+    } for p in (scan_positions or [])]
+    path = Path(state_dir) / "exposure_state.json" if state_dir else None
+    state = load_state(path)
+    before = list(state.get("open_positions") or [])
+    state["open_positions"] = entries
+    if not dry_run:
+        save_state(state, path)
+    return {"before": before, "after": entries, "written": not dry_run}
