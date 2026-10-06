@@ -66,6 +66,27 @@ MAX_CAPITAL_REENTRIES_PER_HOUR = 8
 # hourly re-entry guard above is the outer backstop.
 MAX_CAPITAL_CHAIN_DEPTH = 3
 
+# Prep swaps processed per run_once wake. A deferred-doorbell backlog used to
+# let several preps execute at once (seen live 2026-10-05 15:48: a double buy
+# plus a sell-back). Only preps are capped; closes and claims are never
+# deferred. Override with GEORGE_MAX_PREPS_PER_RUN.
+DEFAULT_MAX_PREPS_PER_RUN = 1
+
+# Sheldon prep swap signals are named sheldon-prep-<base>-<idx>.json.
+PREP_SIGNAL_PREFIX = "sheldon-prep-"
+
+
+def _max_preps_per_run() -> int:
+    try:
+        return max(0, int(os.environ.get("GEORGE_MAX_PREPS_PER_RUN",
+                                         str(DEFAULT_MAX_PREPS_PER_RUN))))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_PREPS_PER_RUN
+
+
+def _is_prep_signal_path(signal_path: Path) -> bool:
+    return signal_path.name.startswith(PREP_SIGNAL_PREFIX)
+
 
 @contextmanager
 def _dispatcher_lock(timeout_seconds: int = 600):
@@ -859,7 +880,17 @@ def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> List[Dict[str, Any]]
             return executed
 
         print(f"[{utc_now()}] Processing {len(pending)} signal(s)...")
+        max_preps = _max_preps_per_run()
+        preps_done = 0
+        deferred_preps: List[str] = []
         for signal_path in pending:
+            # Bound prep swaps per wake: a doorbell backlog must not fire
+            # several preps at once. Closes/claims are never deferred.
+            if _is_prep_signal_path(signal_path):
+                if preps_done >= max_preps:
+                    deferred_preps.append(signal_path.name)
+                    continue
+                preps_done += 1
             status, details = process_signal_path(signal_path, cfg, rails)
             print(f"  {signal_path.name} -> {status}: {details.get('error') or details.get('notes', '')}")
             if status in {"rejected", "failed", "awaiting_approval", "dry_run", "executed", "queued_for_review", "skipped"}:
@@ -880,6 +911,10 @@ def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> List[Dict[str, Any]]
                     processed_signal = {"signal_id": signal_path.stem}
                 executed.append(processed_signal)
                 _safe_record_execution_state(processed_signal)
+        if deferred_preps:
+            print(f"[{utc_now()}] prep cap {max_preps}/wake: deferred "
+                  f"{len(deferred_preps)} prep signal(s) to the next wake: "
+                  f"{', '.join(deferred_preps)}")
     return executed
 
 
