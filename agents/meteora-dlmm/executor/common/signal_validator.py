@@ -192,12 +192,39 @@ def _check_swap_to_usdc(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict
         raise SignalValidationError("reason must be a non-empty string")
 
 
-def _check_freshness(signal: Dict[str, Any], cfg: Dict[str, Any]) -> None:
+def signal_age_seconds(signal: Dict[str, Any]) -> Optional[float]:
+    """Age of a signal in seconds, or None when created_at is unusable.
+
+    A naive timestamp is read as UTC: the signals in circulation carry an
+    explicit offset, but a bare timestamp must not crash the rail.
+    """
+    created_at = signal.get("created_at")
+    if not isinstance(created_at, str):
+        return None
     try:
-        created = datetime.fromisoformat(signal["created_at"].replace("Z", "+00:00"))
-        age = (datetime.now(timezone.utc) - created).total_seconds()
-    except (ValueError, AttributeError) as exc:
-        raise SignalValidationError(f"invalid created_at: {signal.get('created_at')}") from exc
+        created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - created).total_seconds()
+
+
+def check_freshness(signal: Dict[str, Any], cfg: Dict[str, Any]) -> None:
+    """Public freshness gate: raise when the signal is older than the window.
+
+    Exposed so callers that must reason about freshness *before* running full
+    validation (e.g. the dispatcher's per-wake prep cap) do not duplicate the
+    age arithmetic.
+    """
+    _check_freshness(signal, cfg)
+
+
+def _check_freshness(signal: Dict[str, Any], cfg: Dict[str, Any]) -> None:
+    age = signal_age_seconds(signal)
+    if age is None:
+        raise SignalValidationError(
+            f"invalid created_at: {signal.get('created_at')}")
     max_age = cfg.get("signal_max_age_seconds", 300)
     if age > max_age:
         raise SignalValidationError(f"signal stale: {age:.0f}s > {max_age}s")
@@ -233,6 +260,7 @@ def validate_core(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, 
 
     if action == "swap":
         _check_swap(signal, cfg, rails)
+        _check_freshness(signal, cfg)
         return signal
     if action == "swap_to_usdc":
         _check_swap_to_usdc(signal, cfg, rails)

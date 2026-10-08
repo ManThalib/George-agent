@@ -8,6 +8,18 @@ import { simulate, signAndSend, txToBase64 } from "./tx.js";
 const JUPITER_BASE = "https://lite-api.jup.ag/swap/v1";
 const MAX_PRIORITY_LAMPORTS = 500000;
 
+// Transient upstream failures. Jupiter's hosted API returns these under load
+// (seen live 2026-10-08: POST /swap -> 502 Bad Gateway from nginx). Both
+// calls below are build-only and idempotent — the transaction is broadcast
+// later by signAndSend — so retrying them cannot double-spend.
+const TRANSIENT_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+const MAX_HTTP_ATTEMPTS = 3;
+const RETRY_BACKOFF_MS = [250, 750];
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function assertMint(value, field) {
   if (!value || typeof value !== "string" || value.length < 32) {
     throw new Error(`${field} must be a base58 mint address`);
@@ -15,16 +27,36 @@ function assertMint(value, field) {
 }
 
 async function fetchJson(url, init) {
-  const res = await fetch(url, init);
-  const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`Jupiter request failed (${res.status}) at ${url.split("?")[0]}: ${text.slice(0, 300)}`);
+  const endpoint = url.split("?")[0];
+  let lastErr;
+  for (let attempt = 0; attempt < MAX_HTTP_ATTEMPTS; attempt += 1) {
+    let res;
+    let text;
+    try {
+      res = await fetch(url, init);
+      text = await res.text();
+    } catch (err) {
+      lastErr = new Error(`Jupiter request failed (network) at ${endpoint}: ${err.message}`);
+      if (attempt + 1 < MAX_HTTP_ATTEMPTS) {
+        await sleep(RETRY_BACKOFF_MS[attempt] ?? RETRY_BACKOFF_MS[RETRY_BACKOFF_MS.length - 1]);
+        continue;
+      }
+      throw lastErr;
+    }
+    if (res.ok) {
+      try {
+        return JSON.parse(text);
+      } catch {
+        throw new Error(`Jupiter returned non-JSON response: ${text.slice(0, 300)}`);
+      }
+    }
+    lastErr = new Error(`Jupiter request failed (${res.status}) at ${endpoint}: ${text.slice(0, 300)}`);
+    if (!TRANSIENT_STATUS.has(res.status) || attempt + 1 >= MAX_HTTP_ATTEMPTS) {
+      throw lastErr;
+    }
+    await sleep(RETRY_BACKOFF_MS[attempt] ?? RETRY_BACKOFF_MS[RETRY_BACKOFF_MS.length - 1]);
   }
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error(`Jupiter returned non-JSON response: ${text.slice(0, 300)}`);
-  }
+  throw lastErr;
 }
 
 export async function swap(req, connection, wallet) {

@@ -7,12 +7,16 @@ import shutil
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import dispatcher  # noqa: E402
+from common import signal_validator  # noqa: E402
+
+CFG = {"signal_max_age_seconds": 300}
 
 
 class PrepCapHelpersTests(unittest.TestCase):
@@ -59,9 +63,13 @@ class RunOncePrepCapTests(unittest.TestCase):
             setattr(dispatcher, k, v)
         shutil.rmtree(self.root, ignore_errors=True)
 
-    def _write(self, name, action="swap"):
-        (self.pending / name).write_text(json.dumps({"signal_id": name[:-5],
-                                                     "action": action}))
+    def _write(self, name, action="swap", age_seconds=0):
+        created = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+        (self.pending / name).write_text(json.dumps({
+            "signal_id": name[:-5],
+            "action": action,
+            "created_at": created.isoformat(),
+        }))
 
     def _fake_process(self, signal_path, cfg, rails):
         self.calls.append(signal_path.name)
@@ -90,8 +98,128 @@ class RunOncePrepCapTests(unittest.TestCase):
              mock.patch.object(dispatcher, "process_signal_path",
                                side_effect=self._fake_process), \
              mock.patch.object(dispatcher, "_reconcile_exposure", lambda: None):
-            dispatcher.run_once({}, {})
+            dispatcher.run_once({}, CFG)
         self.assertEqual(self.calls, ["sheldon-close-1.json"])
+
+    def test_stale_prep_does_not_consume_the_slot(self):
+        """A stale leftover must not starve the fresh prep behind it.
+
+        Pending sorts by name, and prep names embed the creation epoch, so a
+        leftover backlog always sorts ahead of the current prep.
+        """
+        self._write("sheldon-prep-1-1.json", age_seconds=7200)   # stale, sorts first
+        self._write("sheldon-prep-2-1.json", age_seconds=0)      # fresh
+        with mock.patch.object(dispatcher, "process_signal_path",
+                               side_effect=self._fake_process), \
+             mock.patch.object(dispatcher, "_reconcile_exposure", lambda: None):
+            dispatcher.run_once({}, CFG)
+        # Both are attempted (the stale one only so it leaves pending), but the
+        # cap slot belongs to the fresh prep.
+        self.assertIn("sheldon-prep-2-1.json", self.calls)
+
+    def test_stale_backlog_cannot_block_a_fresh_prep(self):
+        for i in range(1, 4):
+            self._write(f"sheldon-prep-{i}-1.json", age_seconds=7200)
+        self._write("sheldon-prep-9-1.json", age_seconds=0)
+        with mock.patch.object(dispatcher, "process_signal_path",
+                               side_effect=self._fake_process), \
+             mock.patch.object(dispatcher, "_reconcile_exposure", lambda: None):
+            dispatcher.run_once({}, CFG)
+        self.assertIn("sheldon-prep-9-1.json", self.calls)
+
+    def test_fresh_preps_are_still_capped(self):
+        self._write("sheldon-prep-1-1.json", age_seconds=10)
+        self._write("sheldon-prep-2-1.json", age_seconds=5)
+        with mock.patch.object(dispatcher, "process_signal_path",
+                               side_effect=self._fake_process), \
+             mock.patch.object(dispatcher, "_reconcile_exposure", lambda: None):
+            dispatcher.run_once({}, CFG)
+        preps = [c for c in self.calls if c.startswith("sheldon-prep-")]
+        self.assertEqual(len(preps), 1)
+
+
+class PrepFreshnessHelperTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.cfg = {"signal_max_age_seconds": 300}
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _path(self, payload):
+        p = self.root / "sheldon-prep-1-1.json"
+        p.write_text(json.dumps(payload))
+        return p
+
+    def test_fresh_signal(self):
+        p = self._path({"created_at": datetime.now(timezone.utc).isoformat()})
+        self.assertTrue(dispatcher._prep_is_fresh(p, self.cfg))
+
+    def test_old_signal_is_not_fresh(self):
+        old = datetime.now(timezone.utc) - timedelta(seconds=7200)
+        self.assertFalse(dispatcher._prep_is_fresh(
+            self._path({"created_at": old.isoformat()}), self.cfg))
+
+    def test_asia_shanghai_offset_is_understood(self):
+        """Sheldon writes +08:00 timestamps; they must not read as stale."""
+        now_local = datetime.now(timezone(timedelta(hours=8)))
+        self.assertTrue(dispatcher._prep_is_fresh(
+            self._path({"created_at": now_local.isoformat()}), self.cfg))
+
+    def test_unusable_age_is_left_to_validation(self):
+        self.assertTrue(dispatcher._prep_is_fresh(self._path({}), self.cfg))
+        self.assertTrue(dispatcher._prep_is_fresh(
+            self._path({"created_at": "not-a-date"}), self.cfg))
+
+    def test_unreadable_file_is_left_to_validation(self):
+        self.assertTrue(dispatcher._prep_is_fresh(
+            self.root / "missing.json", self.cfg))
+
+
+class SwapFreshnessGateTests(unittest.TestCase):
+    """SAFETY_RAILS.md: signals older than signal_max_age_seconds are stale.
+
+    validate_core returned early for `swap` without calling _check_freshness,
+    so prep swaps (action: swap) had no freshness gate at all: a backlogged
+    prep executed with an amount computed for a long-gone balance.
+    """
+
+    CFG = {"signal_max_age_seconds": 300, "rpc_https_url": "https://rpc.test"}
+    RAILS = {"max_slippage_bps": 100}
+
+    def _swap(self, age_seconds):
+        created = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+        return {
+            "signal_id": "sheldon-prep-1-1",
+            "action": "swap",
+            "input_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            "output_mint": "So11111111111111111111111111111111111111112",
+            "amount": "1000000",
+            "max_slippage_bps": 100,
+            "created_at": created.isoformat(),
+        }
+
+    def test_fresh_swap_passes(self):
+        signal_validator.validate_core(self._swap(5), self.CFG, self.RAILS)
+
+    def test_stale_swap_is_rejected(self):
+        with self.assertRaises(signal_validator.SignalValidationError) as ctx:
+            signal_validator.validate_core(self._swap(7200), self.CFG, self.RAILS)
+        self.assertIn("stale", str(ctx.exception))
+
+    def test_boundary_just_inside_the_window_passes(self):
+        signal_validator.validate_core(self._swap(299), self.CFG, self.RAILS)
+
+    def test_signal_age_seconds_reads_offsets(self):
+        now_local = datetime.now(timezone(timedelta(hours=8)))
+        age = signal_validator.signal_age_seconds(
+            {"created_at": now_local.isoformat()})
+        self.assertIsNotNone(age)
+        self.assertLess(abs(age), 5)
+
+    def test_signal_age_seconds_none_when_unusable(self):
+        for payload in ({}, {"created_at": None}, {"created_at": "nope"}):
+            self.assertIsNone(signal_validator.signal_age_seconds(payload))
 
 
 if __name__ == "__main__":

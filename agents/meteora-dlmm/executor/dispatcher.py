@@ -36,7 +36,11 @@ from common.utils import utc_now, load_json, rails_hash
 from common.config_loader import ConfigError, load_config
 from common.journal import append as journal_append
 from common.rails_loader import RAILS_PATH, load_rails
-from common.signal_validator import SignalValidationError, validate_core
+from common.signal_validator import (
+    SignalValidationError,
+    signal_age_seconds,
+    validate_core,
+)
 from common.chain_client import ChainError, simulate as chain_simulate, send as chain_send
 from common import mirror
 import common.approvals as approvals_store
@@ -86,6 +90,28 @@ def _max_preps_per_run() -> int:
 
 def _is_prep_signal_path(signal_path: Path) -> bool:
     return signal_path.name.startswith(PREP_SIGNAL_PREFIX)
+
+
+def _prep_is_fresh(signal_path: Path, cfg: Dict[str, Any]) -> bool:
+    """True when a prep signal is still inside the freshness window.
+
+    A leftover prep that has already aged out will be rejected by validation
+    no matter what, so it must not consume a per-wake prep slot: doing so let
+    a stale backlog starve the fresh prep that was actually actionable (the
+    deferred file sorts first by name, so the fresh prep lost the slot on
+    every subsequent wake).
+
+    Unusable or unreadable signals report fresh and are left to the normal
+    validation path, so the cap is never silently bypassed.
+    """
+    try:
+        signal = load_json(signal_path)
+    except Exception:
+        return True
+    age = signal_age_seconds(signal)
+    if age is None:
+        return True
+    return age <= float(cfg.get("signal_max_age_seconds", 300))
 
 
 @contextmanager
@@ -909,12 +935,16 @@ def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> List[Dict[str, Any]]
         deferred_preps: List[str] = []
         for signal_path in pending:
             # Bound prep swaps per wake: a doorbell backlog must not fire
-            # several preps at once. Closes/claims are never deferred.
+            # several preps at once. Closes/claims are never deferred. A prep
+            # that is already stale never takes a slot — it is rejected by
+            # validation and moved out of pending either way, and letting it
+            # count would starve the fresh prep behind it.
             if _is_prep_signal_path(signal_path):
-                if preps_done >= max_preps:
-                    deferred_preps.append(signal_path.name)
-                    continue
-                preps_done += 1
+                if _prep_is_fresh(signal_path, cfg):
+                    if preps_done >= max_preps:
+                        deferred_preps.append(signal_path.name)
+                        continue
+                    preps_done += 1
             status, details = process_signal_path(signal_path, cfg, rails)
             print(f"  {signal_path.name} -> {status}: {details.get('error') or details.get('notes', '')}")
             if status in {"rejected", "failed", "awaiting_approval", "dry_run", "executed", "queued_for_review", "skipped"}:
