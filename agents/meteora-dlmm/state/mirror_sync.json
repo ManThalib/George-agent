@@ -6,7 +6,7 @@
       "action": "claim_fees",
       "status": "skipped",
       "detail": "claimable $0.0154 < claim_min_usd 1.0",
-      "at": "2026-10-03T04:09:19.996685+00:00"
+      "at": "2026-10-08T11:41:09.527809+00:00"
     },
     "sheldon-1-0:w2": {
       "signal_id": "sheldon-1-0",
@@ -14,7 +14,7 @@
       "action": "open",
       "status": "gated",
       "detail": "main leg failed; mirror open waits for next cycle",
-      "at": "2026-10-03T04:09:19.997756+00:00"
+      "at": "2026-10-08T11:41:09.528857+00:00"
     },
     "sheldon-test-1:w2": {
       "signal_id": "sheldon-test-1",
