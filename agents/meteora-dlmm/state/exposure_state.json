@@ -2,9 +2,10 @@
   "open_positions": [
     {
       "pool_address": "3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv",
-      "position_id": null,
+      "position_id": "CXBQbhJHHXJ13N73ji2cjh9v6v6FQzEaBjRRVK8gtgsQ",
       "position_usd": 91.13019598188183,
-      "opened_at": "2026-10-02T22:44:33.908805+00:00"
+      "opened_at": "2026-10-02T22:44:33.908805+00:00",
+      "wallet_id": "main"
     }
   ],
   "daily_loss_usd": 0.0,

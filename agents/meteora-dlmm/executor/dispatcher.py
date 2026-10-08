@@ -138,9 +138,33 @@ def _record_execution_state(signal: Dict[str, Any]) -> None:
         exposure_guard.record_open_executed(signal)
 
 
-def _safe_record_execution_state(signal: Dict[str, Any]) -> None:
+def _merge_execution_result(signal: Dict[str, Any],
+                            details: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy execution-derived identifiers onto the signal before recording state.
+
+    The signal file describes the *request*; the on-chain position id only
+    exists after the DEX handler runs (`details["result"]["position_id"]`).
+    Recording the raw signal file stored `position_id: None` for every
+    executed open, which silently disabled position-id matching and the
+    mutation cooldown rail (both no-op on a falsy position_id).
+    """
+    result = details.get("result") if isinstance(details, dict) else None
+    if isinstance(result, dict):
+        for key in ("position_id", "dex"):
+            value = result.get(key)
+            if value and not signal.get(key):
+                signal[key] = value
+    if not signal.get("wallet_id"):
+        signal["wallet_id"] = "main"
+    return signal
+
+
+def _safe_record_execution_state(signal: Dict[str, Any],
+                                 details: Optional[Dict[str, Any]] = None) -> None:
     """Record execution state; never let a guard failure mask the result."""
     try:
+        if details is not None:
+            signal = _merge_execution_result(signal, details)
         _record_execution_state(signal)
     except Exception as exc:
         print(f"[{utc_now()}] exposure state record failed: {exc}")
@@ -910,7 +934,7 @@ def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> List[Dict[str, Any]]
                 except Exception:
                     processed_signal = {"signal_id": signal_path.stem}
                 executed.append(processed_signal)
-                _safe_record_execution_state(processed_signal)
+                _safe_record_execution_state(processed_signal, details)
         if deferred_preps:
             print(f"[{utc_now()}] prep cap {max_preps}/wake: deferred "
                   f"{len(deferred_preps)} prep signal(s) to the next wake: "
@@ -1002,7 +1026,7 @@ def do_approve(signal_id: str, cfg: Dict[str, Any], rails: Dict[str, Any]) -> No
         _trigger_capital_refresh(cfg, signal_id, expected, ambiguous)
     if decision == "executed":
         # The approval path must update exposure state too, not just run_once.
-        _safe_record_execution_state(signal)
+        _safe_record_execution_state(signal, details)
     print(f"{signal_id} -> {decision}: {details}")
     if decision == "executed":
         verify = _self_verify_block(details)
