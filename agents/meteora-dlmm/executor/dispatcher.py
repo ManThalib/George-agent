@@ -86,6 +86,70 @@ CLOSE_REFRESH_ACTIONS = {"close", "rotate", "rebalance"}
 # Sheldon prep swap signals are named sheldon-prep-<base>-<idx>.json.
 PREP_SIGNAL_PREFIX = "sheldon-prep-"
 
+# Wrapped-SOL mint: a USDC->WSOL prep swap is both the SOL gas top-up and the
+# SOL-side position token — the same swap either way, so the priority sorter
+# ranks it as a gas top-up (plan 03 Change G rank 3, mint-based, no reason
+# parsing). Other preps are target-token buys (rank 4).
+WSOL_MINT = "So11111111111111111111111111111111111111112"
+
+# Explicit action priority (plan 03 Change G): de-risk first, then make gas
+# available, then prepare position tokens, open only after readiness, dust
+# cleanup, claims last. An explicit sort replaces filename order so a
+# backlog of stale preps can never delay a close.
+#   1 close
+#   2 rotate / rebalance / remove_liquidity (mutations that de-risk or close)
+#   3 prep swap USDC -> WSOL (gas top-up / SOL side)
+#   4 prep swap USDC -> target token
+#   5 open / add_liquidity / unknown (unknowns are rejected by validation)
+#   6 swap_to_usdc (dust -> USDC)
+#   7 claims
+_ACTION_PRIORITY = {
+    "close": 1,
+    "rotate": 2,
+    "rebalance": 2,
+    "remove_liquidity": 2,
+    "open": 5,
+    "add_liquidity": 5,
+    "swap_to_usdc": 6,
+    "claim_fees": 7,
+    "claim_rewards": 7,
+}
+DEFAULT_ACTION_PRIORITY = 5
+
+
+def _signal_priority(signal_path: Path) -> Tuple[int, str]:
+    """(priority rank, name) for one pending signal path.
+
+    A swap whose output is WSOL is the SOL top-up (rank 3); any other swap
+    is a target-token buy (rank 4). Sheldon's preps are the only plain-swap
+    emitter here, so this is content-based, not filename-based.
+    Unreadable or unknown signals take the neutral default rank and are
+    left to the normal validation path; sorting must never reject anything.
+    """
+    name = signal_path.name
+    try:
+        signal = load_json(signal_path)
+    except Exception:
+        return (DEFAULT_ACTION_PRIORITY, name)
+    action = signal.get("action")
+    if action == "swap":
+        # Sheldon's preps are the only plain-swap emitter in this pipeline;
+        # rank by output mint, not filename, so the class matches the plan.
+        return (3 if signal.get("output_mint") == WSOL_MINT else 4, name)
+    return (_ACTION_PRIORITY.get(action, DEFAULT_ACTION_PRIORITY), name)
+
+
+def _iter_pending_by_priority() -> List[Path]:
+    """Pending signals in explicit priority order (plan 03 Change G).
+
+    Stable on filename within a rank, so ordering is deterministic for a
+    given set of files. A close always outranks swaps and opens; KILL and
+    the per-wake prep cap are unchanged and applied after this sort.
+    """
+    pending = _iter_pending()
+    pending.sort(key=_signal_priority)
+    return pending
+
 
 def _max_preps_per_run() -> int:
     try:
@@ -1145,7 +1209,7 @@ def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> List[Dict[str, Any]]
         # before evaluating any new signal (additive; stale scan is skipped).
         _reconcile_exposure()
 
-        pending = _iter_pending()
+        pending = _iter_pending_by_priority()
         if not pending:
             print(f"[{utc_now()}] No pending signals.")
             return executed
