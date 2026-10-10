@@ -61,6 +61,7 @@ KILL_FILE = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/KI
 # re-reads balances and Sheldon re-evaluates (emitting the open when funded).
 WALLET_REFRESH_SCRIPT = "/data/missy-agent/wallet_screener/run_wallet.sh"
 WALLET_SCAN_DIR = "/data/missy-data/wallet_screens"
+POSITION_REFRESH_SCRIPT = "/data/missy-agent/position_screener/run_positions.sh"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 SHELDON_CYCLE_CMD = ["python3", "/data/.openclaw/workspace-agents/sheldon/scoring/run_cycle.py", "--write-signals"]
 REENTRY_STATE_PATH = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/state/capital_reentry.json")
@@ -76,6 +77,11 @@ MAX_CAPITAL_CHAIN_DEPTH = 3
 # plus a sell-back). Only preps are capped; closes and claims are never
 # deferred. Override with GEORGE_MAX_PREPS_PER_RUN.
 DEFAULT_MAX_PREPS_PER_RUN = 1
+
+# Successful mutations that free capital or change the position set enough
+# that the pipeline must re-scan before Sheldon re-decides (plan 03 Change F).
+# The refresh fires at the run_once epilogue, outside the dispatcher lock.
+CLOSE_REFRESH_ACTIONS = {"close", "rotate", "rebalance"}
 
 # Sheldon prep swap signals are named sheldon-prep-<base>-<idx>.json.
 PREP_SIGNAL_PREFIX = "sheldon-prep-"
@@ -352,6 +358,78 @@ def _run_wallet_refresh(cfg: Dict[str, Any], expected_usdc_delta: int = 0,
             time.sleep(6)  # let the RPC indexer catch up with the confirmed tx
     return (f"ok (usdc delta unverified: {pre} -> {cur}) "
             f"-> {last_out[0] if last_out else ''}")
+
+
+def _absence_note(target: Dict[str, Any],
+                  positions: List[Dict[str, Any]]) -> Tuple[bool, str]:
+    """(absent_or_not_blocking, human note) for one closed position.
+
+    A `close` asserts the position is really gone from the fresh scan
+    (strict). A rotate/rebalance may legitimately re-open in the same pool,
+    so a still-present pool is reported as not asserted, never as failure.
+    Mirror-wallet targets are never asserted: run_positions.sh scans MAIN.
+    """
+    wallet_id = str(target.get("wallet_id") or "main")
+    pool = str(target.get("pool_address") or "")
+    if wallet_id != "main":
+        return True, f"not asserted (wallet {wallet_id} is not scanned by the position screener)"
+    same_pool = [p for p in positions
+                 if exposure_guard._scan_key(p) == (wallet_id, pool)]
+    position_address = str(target.get("position_address") or "")
+    if not same_pool:
+        return True, "position absent from fresh scan"
+    if position_address and not any(
+            str(p.get("position_address") or "") == position_address
+            for p in same_pool):
+        return True, "old position gone; pool reused by a new position"
+    if target.get("strict"):
+        return False, (f"closed position still present in fresh scan "
+                       f"({len(same_pool)} position(s) in {pool[:8]}...)")
+    return True, "not asserted: target pool still has positions (reopen expected)"
+
+
+def _run_position_refresh(
+        cfg: Dict[str, Any],
+        absence_targets: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, Any]]]:
+    """Run Missy's position scan and check the closed positions are gone.
+
+    Returns (result string, per-target absence results). A scan that fails
+    to refresh reports FAILED and leaves absence unknown (never asserted).
+    Read-only for the wallet: the screener only reads chain state.
+    """
+    rpc = cfg.get("rpc_https_url")
+    wallet = cfg.get("wallet_public_key")
+    if not rpc or not wallet:
+        return "skipped (missing rpc_https_url / wallet_public_key in config)", []
+    env = {**os.environ, "SOLANA_RPC_URL": rpc, "SOLANA_PUBLIC_WALLET": wallet}
+    _, pre_mtime = exposure_guard.load_scan_positions()
+    last_out = ""
+    for attempt in range(4):
+        try:
+            proc = subprocess.run(
+                ["bash", POSITION_REFRESH_SCRIPT], env=env, capture_output=True,
+                text=True, timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            return "FAILED (timeout after 120s)", []
+        except Exception as exc:
+            return f"FAILED ({exc})", []
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:] or ["no output"]
+            return f"FAILED exit={proc.returncode}: {tail[0][:160]}", []
+        last_out = (proc.stdout or "").strip().splitlines()[-1:]
+        positions, cur_mtime = exposure_guard.load_scan_positions()
+        if cur_mtime <= pre_mtime:
+            if attempt < 3:
+                time.sleep(6)  # let the refresh land a new scan
+                continue
+            return (f"ok (scan not refreshed: mtime unchanged) "
+                    f"-> {last_out[0] if last_out else ''}"), []
+        absence = [dict(target, absent=absent, note=note)
+                   for target in absence_targets
+                   for absent, note in [_absence_note(target, positions)]]
+        return f"ok -> {last_out[0] if last_out else ''}", absence
+    return "FAILED (unreachable)", []
 
 
 def _run_sheldon_reentry() -> Tuple[str, str]:
@@ -918,9 +996,117 @@ def _expected_usdc_delta(executed: List[Dict[str, Any]]) -> Tuple[int, bool]:
     return total, ambiguous
 
 
+def _trigger_close_refresh(cfg: Dict[str, Any], closes: List[Dict[str, Any]]) -> None:
+    """After successful close(s)/rotate/rebalance: refresh Missy's position
+    scan (the authoritative view of what still exists) and wallet scan, then
+    let Sheldon re-decide on real state and wake George only if it wrote new
+    signals (plan 03 Change F).
+
+    Bounds: one follow-up wake per refresh, the shared hourly re-entry cap,
+    MAX_CAPITAL_CHAIN_DEPTH for in-process chains, one dispatcher lock (the
+    epilogue runs after run_once releases it). A strict close whose position
+    is STILL in the fresh scan does not re-enter Sheldon — re-deciding on a
+    position that may still exist is exactly the close -> scan -> close loop
+    Change F forbids; the owner is notified instead.
+
+    Failures here never undo the close; they only cost latency (the hourly
+    pipeline re-runs Sheldon anyway).
+    """
+    ids = ",".join(str(c.get("signal_id")) for c in closes)
+    if os.environ.get("GEORGE_SKIP_CAPITAL_REFRESH"):
+        print(f"[{utc_now()}] close refresh skipped (GEORGE_SKIP_CAPITAL_REFRESH set)")
+        return
+    if KILL_FILE.exists():
+        print(f"[{utc_now()}] close refresh skipped (KILL file present)")
+        return
+    depth = int(os.environ.get("GEORGE_CAPITAL_DEPTH") or 0)
+    if depth >= MAX_CAPITAL_CHAIN_DEPTH:
+        _notify_owner(
+            f"CLOSE CHAIN DEPTH LIMIT signal={ids}: depth {depth} >= "
+            f"{MAX_CAPITAL_CHAIN_DEPTH}; remaining legs left to the next cycle"
+        )
+        return
+
+    now = time.time()
+    state = _load_reentry_state()
+    allowed, reason = _reentry_allowed(state, now)
+    if not allowed:
+        _notify_owner(f"CLOSE REFRESH SKIPPED signal={ids}: {reason}")
+        return
+    state["timestamps"] = _reentry_window(state, now) + [now]
+    _save_reentry_state(state)
+
+    targets = [{
+        "wallet_id": c.get("wallet_id") or "main",
+        "pool_address": c.get("pool_address") or "",
+        "position_address": c.get("position_id") or c.get("position_address") or "",
+        "strict": c.get("action") == "close",
+    } for c in closes]
+
+    print(f"[{utc_now()}] close refresh for {ids} (depth {depth}): position rescan...")
+    position_result, absence = _run_position_refresh(cfg, targets)
+    print(f"[{utc_now()}] position rescan: {position_result}")
+
+    # A strict close that is not confirmed gone blocks re-entry — and so does
+    # an absence we could not check at all (scan failed / never refreshed):
+    # re-deciding on unverified state is exactly the close->scan->close loop
+    # Change F forbids. Scans still run so the owner sees the wallet state.
+    blocked = (len(absence) != len(targets)
+               or any(not a.get("absent") for a in absence))
+    print(f"[{utc_now()}] close refresh: wallet rescan...")
+    wallet_result = _run_wallet_refresh(cfg, 0, ambiguous=True)
+    print(f"[{utc_now()}] wallet rescan: {wallet_result}")
+
+    sheldon_result = "skipped (closed position still in fresh position scan)" if blocked else "not run"
+    followup_result = "skipped"
+    if not blocked:
+        print(f"[{utc_now()}] close refresh: Sheldon re-entry...")
+        sheldon_result, sheldon_stdout = _run_sheldon_reentry()
+        print(f"[{utc_now()}] Sheldon re-entry: {sheldon_result}")
+        if "WAKE_GEORGE:" in sheldon_stdout:
+            print(f"[{utc_now()}] close refresh: dispatcher follow-up...")
+            followup_result = _run_dispatcher_followup(depth)
+            print(f"[{utc_now()}] dispatcher follow-up: {followup_result}")
+
+    for close, target, ab in zip(closes, targets, absence or [{} for _ in closes]):
+        try:
+            journal_append(
+                {"signal_id": close.get("signal_id"), "action": close.get("action"),
+                 "wallet_id": target.get("wallet_id"), "pool_address": target.get("pool_address")},
+                "close_refresh",
+                {"position_scan": position_result,
+                 "absence": {"asserted": bool(target.get("strict")),
+                             "absent": ab.get("absent"), "note": ab.get("note")},
+                  "wallet_scan": wallet_result,
+                  "sheldon": sheldon_result,
+                  "followup": followup_result,
+                  "depth": depth},
+                rails_hash(RAILS_PATH),
+            )
+        except Exception as exc:
+            print(f"[{utc_now()}] close refresh journal failed: {exc}")
+
+    if blocked:
+        _notify_owner(
+            f"CLOSE REFRESH INCOMPLETE signal={ids}: position scan "
+            f"{position_result}" + (
+                f"; {'; '.join(a.get('note', '') for a in absence if not a.get('absent'))}"
+                if absence else "; absence unverified (no fresh scan)"
+            ) + ". Sheldon re-entry withheld to avoid a close->scan->close "
+            "loop; inspect the fresh position scan before acting."
+        )
+    else:
+        _notify_owner(
+            f"CLOSE REFRESH signal={ids}: position scan {position_result}; "
+            f"wallet scan {wallet_result}; Sheldon {sheldon_result}; "
+            f"follow-up {followup_result}"
+        )
+
+
 def _capital_epilogue(cfg: Dict[str, Any], executed: List[Dict[str, Any]]) -> None:
     """After run_once releases the dispatcher lock: mirror-drift report, then
-    (if a swap executed) the wallet rescan -> Sheldon re-entry chain."""
+    the refresh chains (wallet rescan -> Sheldon re-entry -> bounded
+    dispatcher follow-up) for the mutations that need them."""
     drift = mirror.check_drift()
     if drift:
         lines = "; ".join(
@@ -935,11 +1121,14 @@ def _capital_epilogue(cfg: Dict[str, Any], executed: List[Dict[str, Any]]) -> No
         )
 
     swaps = [s for s in executed if s.get("action") == "swap"]
-    if not swaps:
-        return
-    expected, ambiguous = _expected_usdc_delta(swaps)
-    ids = ",".join(str(s.get("signal_id")) for s in swaps)
-    _trigger_capital_refresh(cfg, ids, expected, ambiguous)
+    if swaps:
+        expected, ambiguous = _expected_usdc_delta(swaps)
+        ids = ",".join(str(s.get("signal_id")) for s in swaps)
+        _trigger_capital_refresh(cfg, ids, expected, ambiguous)
+
+    closes = [s for s in executed if s.get("action") in CLOSE_REFRESH_ACTIONS]
+    if closes:
+        _trigger_close_refresh(cfg, closes)
 
 
 def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> List[Dict[str, Any]]:
