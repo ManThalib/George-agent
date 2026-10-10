@@ -42,6 +42,7 @@ from common.signal_validator import (
     validate_core,
 )
 from common.chain_client import ChainError, simulate as chain_simulate, send as chain_send
+from common import live_preflight
 from common import mirror
 import common.approvals as approvals_store
 import common.dust_queue as dust_queue
@@ -819,6 +820,16 @@ def process_signal(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str,
         if not allowed:
             return "rejected", {"stage": "exposure_guard", "error": reason}
 
+    # Live balance preflight (Change B-D): re-check the wallet's real SOL and
+    # token balances immediately before simulation. The signal may come from a
+    # stale scan, an unsettled prep swap, or a duplicate pending open; a
+    # shortfall is reported mechanically here instead of surfacing as a raw
+    # Solana "insufficient funds" error from a later simulation/send.
+    if action == "open":
+        reject = _open_preflight(signal, cfg, rails)
+        if reject is not None:
+            return "rejected", reject
+
     mode = cfg.get("mode", "dry_run")
     if mode == "auto":
         return _handle_auto(signal, cfg, rails)
@@ -827,6 +838,27 @@ def process_signal(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str,
 
     decision, details = _run_simulation(signal, cfg, rails)
     return decision, details
+
+
+def _open_preflight(signal: Dict[str, Any], cfg: Dict[str, Any],
+                    rails: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Live SOL/token preflight for an open.
+
+    Returns a journal-ready rejection dict when the open must not proceed,
+    or None when the live balances satisfy the DEX/signal/position-size-
+    aware requirement. Non-open actions are always allowed through.
+    """
+    if signal.get("action") != "open":
+        return None
+    try:
+        ok, details = live_preflight.preflight_open(signal, cfg, rails)
+    except Exception as exc:  # fail closed: never open on an unverifiable state
+        return {
+            "stage": "preflight_sol",
+            "error_code": "PREFLIGHT_UNAVAILABLE",
+            "error": str(exc),
+        }
+    return None if ok else details
 
 
 def _handle_auto(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
@@ -1031,6 +1063,20 @@ def do_approve(signal_id: str, cfg: Dict[str, Any], rails: Dict[str, Any]) -> No
     except SignalValidationError as exc:
         print(f"Approval rejected: rails no longer pass: {exc}")
         sys.exit(1)
+
+    # Live balance preflight also guards the (re-)send path: a signal that
+    # passed validation when queued may no longer be funded when approved.
+    reject = _open_preflight(signal, cfg, rails)
+    if reject is not None:
+        journal_append(
+            signal=signal,
+            decision="rejected",
+            details=reject,
+            rails_hash=rails_hash(RAILS_PATH),
+        )
+        approvals_store.move_to(signal_id, approvals_store.REJECTED_DIR)
+        print(f"Approval rejected: live preflight failed: {json.dumps(reject, default=str)}")
+        return
 
     decision, details = _do_send(signal, cfg, rails)
     journal_append(

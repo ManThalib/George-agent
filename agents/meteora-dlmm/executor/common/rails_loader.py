@@ -81,6 +81,7 @@ def _load_execution_limits() -> Dict[str, Any]:
         "circuit_breakers",
         "execution_guards",
         "range_limits",
+        "preflight",
     ):
         for key, val in (data.get(group) or {}).items():
             limits[key] = val
