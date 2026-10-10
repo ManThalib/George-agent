@@ -81,6 +81,50 @@ class ReconcilePositionsTests(unittest.TestCase):
         state = exposure_guard.load_state(path=self.state_path)
         self.assertEqual(state["open_positions"][0]["pool_address"], "pool1")
 
+    def test_reconcile_skips_closed_rows(self):
+        # Bug #4/#8 (live 2026-10-10): a just-closed position still listed as
+        # a status=closed row must not become a tracked phantom entry.
+        self._make_state([])
+        scan = [{"pool_address": "closedpool", "status": "closed",
+                 "wallet_id": "main", "position_address": "pda1",
+                 "liquidity_raw": 0}]
+        now = time.time()
+        report = exposure_guard.reconcile_positions(
+            scan, scan_mtime=now - 60, now=now, state_dir=self.state_dir)
+        self.assertEqual(report["added"], [])
+        state = exposure_guard.load_state(path=self.state_path)
+        self.assertEqual(state["open_positions"], [])
+
+    def test_reconcile_captures_scan_position_id(self):
+        # Bug #8 (live 2026-10-10): scan rows carry position_address/mint;
+        # reconcile stored position_id=None, creating entries a close can
+        # never match or remove.
+        self._make_state([])
+        scan = [{"pool_address": "poolA", "status": "active",
+                 "wallet_id": "main", "position_address": "pdaX",
+                 "position_mint": "mintX", "position_usd": 21.0}]
+        now = time.time()
+        report = exposure_guard.reconcile_positions(
+            scan, scan_mtime=now - 60, now=now, state_dir=self.state_dir)
+        self.assertEqual(len(report["added"]), 1)
+        state = exposure_guard.load_state(path=self.state_path)
+        self.assertEqual(state["open_positions"][0]["position_id"], "pdaX")
+
+    def test_second_position_same_pool_added(self):
+        # Pool-count matching: a second live row in an already-tracked pool
+        # must be added (with its id), not collapsed by the pool-only key.
+        self._make_state([{"pool_address": "poolA", "wallet_id": "main",
+                           "position_id": "pid1", "position_usd": 20.0}])
+        scan = [{"pool_address": "poolA", "status": "active",
+                 "wallet_id": "main", "position_address": "pid1"},
+                {"pool_address": "poolA", "status": "active",
+                 "wallet_id": "main", "position_address": "pid2"}]
+        now = time.time()
+        report = exposure_guard.reconcile_positions(
+            scan, scan_mtime=now - 60, now=now, state_dir=self.state_dir)
+        self.assertEqual(len(report["added"]), 1)
+        self.assertEqual(report["added"][0]["position_id"], "pid2")
+
     def test_keeps_existing_position(self):
         self._make_state([{"pool_address": "pool1", "wallet_id": "main",
                            "position_usd": 50.0}])

@@ -68,6 +68,31 @@ export async function openPosition(req, connection, wallet) {
 
   const positionKeypair = Keypair.generate();
   const BN = require("bn.js");
+
+  // Active-bin deposit-side guard (live 2026-10-10, bug #7): the active bin
+  // can drift past the range between the Python tick check and this build.
+  // Bins above the active bin need token X; bins below need token Y. A
+  // one-sided deposit whose side has no eligible bins "succeeds" with a ZERO
+  // deposit. Refuse at build time instead:
+  //   x-only needs active <= upper; y-only needs active >= lower;
+  //   two-sided mirrors add_liquidity and needs active inside the range.
+  const activeBinOpen = await dlmm.getActiveBin();
+  const activeIdOpen = Number(activeBinOpen?.binId);
+  if (Number.isFinite(activeIdOpen)) {
+    const xOnly = BigInt(amount_x || "0") > 0n && BigInt(amount_y || "0") === 0n;
+    const yOnly = BigInt(amount_y || "0") > 0n && BigInt(amount_x || "0") === 0n;
+    const sideDead =
+      (xOnly && activeIdOpen > upper) ||
+      (yOnly && activeIdOpen < lower) ||
+      (!xOnly && !yOnly && (activeIdOpen < lower || activeIdOpen > upper));
+    if (sideDead) {
+      throw new Error(
+        `meteora open refused: active bin ${activeIdOpen} vs range [${lower}, ${upper}] ` +
+        `(deposit x=${amount_x} y=${amount_y} would land zero liquidity)`
+      );
+    }
+  }
+
   let tx;
   try {
     tx = await dlmm.initializePositionAndAddLiquidityByStrategy({
@@ -128,6 +153,7 @@ export async function closePosition(req, connection, wallet) {
   const BN = require("bn.js");
   let removeTxs = [];
   let claimAndCloseTxs = [];
+  let closeOnlyTx = null;
   if (bins.length > 0) {
     const fromBinId = Math.min(...bins.map((b) => b.binId));
     const toBinId = Math.max(...bins.map((b) => b.binId));
@@ -156,11 +182,24 @@ export async function closePosition(req, connection, wallet) {
       shouldClaimAndClose: true,
     });
     claimAndCloseTxs = asTransactions(tx);
+  } else {
+    // Fully empty position (live 2026-10-10, bug #10): no liquidity and no
+    // per-bin fees. Build the close-only tx here so BOTH simulate and send
+    // can close it — previously the simulate branch threw
+    // "meteora close built no transaction" and the pipeline could never
+    // close an empty position.
+    const freshPos = await dlmm.getPosition(positionPubKey);
+    const binsLeft = (freshPos.positionData?.positionBinData || []).filter(
+      (b) => BigInt(b.positionLiquidity || "0") > 0n
+    );
+    closeOnlyTx = binsLeft.length
+      ? await dlmm.closePosition({ owner: wallet.publicKey, position: freshPos })
+      : await dlmm.closePositionIfEmpty({ owner: wallet.publicKey, position: freshPos });
+    if (!closeOnlyTx) throw new Error("meteora closePosition returned no transaction");
   }
 
   if (req.mode === "simulate") {
-    const txs = removeTxs.length ? removeTxs : claimAndCloseTxs;
-    if (!txs.length) throw new Error("meteora close built no transaction");
+    const txs = removeTxs.length ? removeTxs : claimAndCloseTxs.length ? claimAndCloseTxs : [closeOnlyTx];
     const sims = await Promise.all(txs.map((tx) => simulate(connection, tx)));
     return { tx_base64: txs.map((tx) => txToBase64(tx)), simulation: sims };
   }
@@ -169,6 +208,13 @@ export async function closePosition(req, connection, wallet) {
   for (const tx of removeTxs) {
     const sent = await signAndSend(connection, tx, wallet, []);
     signatures.push({ step: "removeLiquidity", ...sent });
+  }
+
+  if (closeOnlyTx) {
+    const sent = await signAndSend(connection, closeOnlyTx, wallet, []);
+    signatures.push({ step: "closePosition", ...sent });
+    const verify = await verifyClosed(req, connection, wallet, positionPubKey);
+    return { signatures, close_signature: sent.signature, verify };
   }
 
   if (claimAndCloseTxs.length > 0) {

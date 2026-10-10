@@ -67,6 +67,10 @@ SHELDON_CYCLE_CMD = ["python3", "/data/.openclaw/workspace-agents/sheldon/scorin
 REENTRY_STATE_PATH = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/state/capital_reentry.json")
 LOCK_PATH = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/state/dispatcher.lock")
 MAX_CAPITAL_REENTRIES_PER_HOUR = 8
+# Close bursts are bounded per close (one follow-up each) but a burst of
+# several closes in one hour must not starve on the swap cap (owner-approved
+# 2026-10-10: separate, higher close-refresh re-entry cap).
+MAX_CLOSE_REENTRIES_PER_HOUR = 20
 # A prep swap re-enters the dispatcher after Sheldon re-scores (to process
 # the open, or another prep swap). Depth bounds the in-process chain; the
 # hourly re-entry guard above is the outer backstop.
@@ -292,16 +296,19 @@ def _reconcile_exposure() -> None:
         print(f"[{utc_now()}] exposure reconcile failed: {exc}")
 
 
-def _reentry_window(state: Dict[str, Any], now: float) -> List[float]:
+def _reentry_window(state: Dict[str, Any], now: float,
+                    key: str = "timestamps") -> List[float]:
     """Timestamps of capital re-entries inside the last hour."""
-    stamps = state.get("timestamps") or []
+    stamps = state.get(key) or []
     return [t for t in stamps if isinstance(t, (int, float)) and now - t < 3600]
 
 
-def _reentry_allowed(state: Dict[str, Any], now: float) -> Tuple[bool, str]:
-    recent = _reentry_window(state, now)
-    if len(recent) >= MAX_CAPITAL_REENTRIES_PER_HOUR:
-        return False, f"loop guard: {len(recent)} capital re-entries in the last hour"
+def _reentry_allowed(state: Dict[str, Any], now: float,
+                     cap: int = MAX_CAPITAL_REENTRIES_PER_HOUR,
+                     key: str = "timestamps") -> Tuple[bool, str]:
+    recent = _reentry_window(state, now, key)
+    if len(recent) >= cap:
+        return False, f"loop guard: {len(recent)} re-entries in the last hour (cap {cap})"
     return True, ""
 
 
@@ -437,13 +444,18 @@ def _absence_note(target: Dict[str, Any],
     pool = str(target.get("pool_address") or "")
     if wallet_id != "main":
         return True, f"not asserted (wallet {wallet_id} is not scanned by the position screener)"
+    # Closed/zero-liquidity rows are not live positions (bug #4): a scan that
+    # still lists a just-closed position as a closed row must not fail the
+    # absence assertion.
     same_pool = [p for p in positions
-                 if exposure_guard._scan_key(p) == (wallet_id, pool)]
+                 if exposure_guard._scan_key(p) == (wallet_id, pool)
+                 and exposure_guard.row_is_open(p)]
     position_address = str(target.get("position_address") or "")
     if not same_pool:
         return True, "position absent from fresh scan"
     if position_address and not any(
-            str(p.get("position_address") or "") == position_address
+            any(str(p.get(k) or "") == position_address
+                for k in ("position_address", "position_id", "position_mint"))
             for p in same_pool):
         return True, "old position gone; pool reused by a new position"
     if target.get("strict"):
@@ -837,6 +849,26 @@ def _run_mirror_legs(
             leg_req = dex_builder.build(leg_signal, cfg, rails)
             registered = registry.get(wallet_id)
             leg_req["wallet_public_key"] = registered or leg_req["wallet_public_key"]
+            if open_like:
+                # Owner decision 2026-10-10 (#16): mirror open legs get the
+                # same live SOL/token preflight as MAIN, against the MIRROR
+                # wallet's balances. Fail-closed: an unverifiable mirror
+                # balance defers the leg (open legs are already gated on the
+                # next cycle; closes never run through this branch).
+                mirror_cfg = {**cfg,
+                              "wallet_public_key": leg_req["wallet_public_key"],
+                              "wallet_registry": {}}
+                reject = _open_preflight(leg_signal, mirror_cfg, rails)
+                if reject is not None:
+                    mirror.record_leg(signal.get("signal_id", ""), wallet_id,
+                                      leg_signal["action"], "preflight_blocked",
+                                      json.dumps(reject, default=str)[:200])
+                    mirror.record_drift(signal.get("signal_id", ""), wallet_id,
+                                        leg_signal["action"],
+                                        "mirror preflight failed; deferred")
+                    legs.append({"wallet_id": wallet_id, "status": "preflight_blocked",
+                                 "detail": str(reject.get("error_code") or reject)[:200]})
+                    continue
             leg_result = chain_send(leg_req)
             if isinstance(leg_result, dict) and leg_result.get("skipped"):
                 mirror.record_leg(signal.get("signal_id", ""), wallet_id,
@@ -967,7 +999,7 @@ def process_signal(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str,
     # stale scan, an unsettled prep swap, or a duplicate pending open; a
     # shortfall is reported mechanically here instead of surfacing as a raw
     # Solana "insufficient funds" error from a later simulation/send.
-    if action == "open":
+    if action in {"open", "rotate", "rebalance"} or (action == "add_liquidity"):
         reject = _open_preflight(signal, cfg, rails)
         if reject is not None:
             return "rejected", reject
@@ -990,7 +1022,11 @@ def _open_preflight(signal: Dict[str, Any], cfg: Dict[str, Any],
     or None when the live balances satisfy the DEX/signal/position-size-
     aware requirement. Non-open actions are always allowed through.
     """
-    if signal.get("action") != "open":
+    if signal.get("action") not in {"open", "add_liquidity", "rotate", "rebalance"}:
+        return None
+    if signal.get("action") in {"rotate", "rebalance"} and not signal.get("liquidity"):
+        # Close-only leg: never gate a de-risking mutation (owner decision
+        # 2026-10-10 #15: preflight applies to the OPEN leg only).
         return None
     try:
         ok, details = live_preflight.preflight_open(signal, cfg, rails)
@@ -1060,7 +1096,7 @@ def _expected_usdc_delta(executed: List[Dict[str, Any]]) -> Tuple[int, bool]:
     return total, ambiguous
 
 
-def _trigger_close_refresh(cfg: Dict[str, Any], closes: List[Dict[str, Any]]) -> None:
+def _trigger_close_refresh(cfg: Dict[str, Any], closes: List[Dict[str, Any]]) -> bool:
     """After successful close(s)/rotate/rebalance: refresh Missy's position
     scan (the authoritative view of what still exists) and wallet scan, then
     let Sheldon re-decide on real state and wake George only if it wrote new
@@ -1079,10 +1115,10 @@ def _trigger_close_refresh(cfg: Dict[str, Any], closes: List[Dict[str, Any]]) ->
     ids = ",".join(str(c.get("signal_id")) for c in closes)
     if os.environ.get("GEORGE_SKIP_CAPITAL_REFRESH"):
         print(f"[{utc_now()}] close refresh skipped (GEORGE_SKIP_CAPITAL_REFRESH set)")
-        return
+        return True
     if KILL_FILE.exists():
         print(f"[{utc_now()}] close refresh skipped (KILL file present)")
-        return
+        return True
     depth = int(os.environ.get("GEORGE_CAPITAL_DEPTH") or 0)
     if depth >= MAX_CAPITAL_CHAIN_DEPTH:
         _notify_owner(
@@ -1093,11 +1129,13 @@ def _trigger_close_refresh(cfg: Dict[str, Any], closes: List[Dict[str, Any]]) ->
 
     now = time.time()
     state = _load_reentry_state()
-    allowed, reason = _reentry_allowed(state, now)
+    allowed, reason = _reentry_allowed(state, now,
+                                       cap=MAX_CLOSE_REENTRIES_PER_HOUR,
+                                       key="close_timestamps")
     if not allowed:
         _notify_owner(f"CLOSE REFRESH SKIPPED signal={ids}: {reason}")
-        return
-    state["timestamps"] = _reentry_window(state, now) + [now]
+        return True
+    state["close_timestamps"] = _reentry_window(state, now, "close_timestamps") + [now]
     _save_reentry_state(state)
 
     targets = [{
@@ -1159,18 +1197,22 @@ def _trigger_close_refresh(cfg: Dict[str, Any], closes: List[Dict[str, Any]]) ->
             ) + ". Sheldon re-entry withheld to avoid a close->scan->close "
             "loop; inspect the fresh position scan before acting."
         )
+        return True
     else:
         _notify_owner(
             f"CLOSE REFRESH signal={ids}: position scan {position_result}; "
             f"wallet scan {wallet_result}; Sheldon {sheldon_result}; "
             f"follow-up {followup_result}"
         )
+        return False
 
 
-def _capital_epilogue(cfg: Dict[str, Any], executed: List[Dict[str, Any]]) -> None:
+def _capital_epilogue(cfg: Dict[str, Any], executed: List[Dict[str, Any]]) -> bool:
     """After run_once releases the dispatcher lock: mirror-drift report, then
     the refresh chains (wallet rescan -> Sheldon re-entry -> bounded
-    dispatcher follow-up) for the mutations that need them."""
+    dispatcher follow-up) for the mutations that need them. Returns True
+    when a close-refresh ended incomplete (owner decision 2026-10-10 #20:
+    the --once run exits non-zero so automation/monitoring sees it)."""
     drift = mirror.check_drift()
     if drift:
         lines = "; ".join(
@@ -1192,7 +1234,8 @@ def _capital_epilogue(cfg: Dict[str, Any], executed: List[Dict[str, Any]]) -> No
 
     closes = [s for s in executed if s.get("action") in CLOSE_REFRESH_ACTIONS]
     if closes:
-        _trigger_close_refresh(cfg, closes)
+        return _trigger_close_refresh(cfg, closes)
+    return False
 
 
 def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1249,7 +1292,22 @@ def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> List[Dict[str, Any]]
                 except Exception:
                     processed_signal = {"signal_id": signal_path.stem}
                 executed.append(processed_signal)
-                _safe_record_execution_state(processed_signal, details)
+                # Bug #9 (live 2026-10-10): an open that failed self-verify
+                # must not occupy a tracked slot at full position_usd — the
+                # deposit is unconfirmed. The reconcile pass re-adds it from
+                # a later scan if it really exists.
+                _verify = _self_verify_block(details)
+                _unverified = (
+                    processed_signal.get("action") in {"open", "add_liquidity"}
+                    and (_verify is None or not _verify.get("ok"))
+                )
+                if _unverified:
+                    print(f"[{utc_now()}] exposure tracking skipped for "
+                          f"{processed_signal.get('signal_id')}: self-verify "
+                          f"failed; reconcile will re-add if the deposit "
+                          f"landed")
+                else:
+                    _safe_record_execution_state(processed_signal, details)
         if deferred_preps:
             print(f"[{utc_now()}] prep cap {max_preps}/wake: deferred "
                   f"{len(deferred_preps)} prep signal(s) to the next wake: "
@@ -1277,9 +1335,18 @@ def process_signal_path(signal_path: Path, cfg: Dict[str, Any], rails: Dict[str,
     except Exception as exc:
         status, details = "failed", {"error": str(exc), "traceback": traceback.format_exc()}
 
+    # Bug #7b (live 2026-10-10): an executed open whose on-chain self-verify
+    # failed (e.g. a zero deposit) must not journal as a plain "executed" —
+    # downstream consumers read that as "capital deployed and verified".
+    journal_status = status
+    if status == "executed" and signal.get("action") in {"open", "add_liquidity"}:
+        verify = _self_verify_block(details)
+        if verify is None or not verify.get("ok"):
+            journal_status = "executed_unverified"
+
     journal_append(
         signal=signal,
-        decision=status,
+        decision=journal_status,
         details=details,
         rails_hash=rails_hash(RAILS_PATH),
     )
@@ -1555,7 +1622,11 @@ def main() -> None:
         return
 
     if args.once:
-        _capital_epilogue(cfg, run_once(cfg, rails))
+        incomplete = _capital_epilogue(cfg, run_once(cfg, rails))
+        if incomplete:
+            # Owner decision 2026-10-10 (#20): an incomplete close-refresh is
+            # a failed cycle for automation/monitoring purposes.
+            sys.exit(1)
         return
 
     while True:

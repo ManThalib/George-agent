@@ -167,6 +167,27 @@ class CloseRefreshTests(unittest.TestCase):
         self.assertIn("skipped", entry["details"]["sheldon"])
         self.assertIn("CLOSE REFRESH INCOMPLETE", " ".join(self.notifications))
 
+    def test_closed_row_in_fresh_scan_does_not_block_absence(self):
+        # Bug #4 (live 2026-10-10): the screener keeps listing just-closed
+        # positions as status=closed rows; that must NOT fail the absence
+        # assertion or withhold Sheldon re-entry.
+        self._seed_scan()
+        self.scan_positions = [{"wallet_id": "main", "pool_address": "POOLA",
+                                "position_address": "POS1",
+                                "status": "closed", "liquidity_raw": 0}]
+        dispatcher._trigger_close_refresh(CFG, [self._close()])
+        self.assertEqual(len(self.sheldon_calls), 1)
+        entry = [e for e in self._journal_entries() if e.get("decision") == "close_refresh"][0]
+        self.assertTrue(entry["details"]["absence"]["absent"])
+
+    def test_zero_liquidity_row_does_not_block_absence(self):
+        self._seed_scan()
+        self.scan_positions = [{"wallet_id": "main", "pool_address": "POOLA",
+                                "position_address": "POS1",
+                                "status": "active", "liquidity_raw": 0}]
+        dispatcher._trigger_close_refresh(CFG, [self._close()])
+        self.assertEqual(len(self.sheldon_calls), 1)
+
     def test_position_id_gone_pool_reused_is_absent(self):
         self._seed_scan()
         self.scan_positions = [{"wallet_id": "main", "pool_address": "POOLA",
@@ -214,11 +235,23 @@ class CloseRefreshTests(unittest.TestCase):
     def test_hourly_cap_blocks_close_refresh(self):
         self._seed_scan()
         now = dispatcher.time.time()
+        # Owner decision 2026-10-10 (#21): close refresh has its OWN hourly
+        # cap (20) separate from the swap/capital re-entry cap (8) — filling
+        # the swap cap must NOT block a close refresh.
         with open(self.state_path, "w") as fh:
-            json.dump({"timestamps": [now - i * 60 for i in range(8)]}, fh)
+            json.dump({"close_timestamps": [now - i * 60 for i in range(20)]}, fh)
         dispatcher._trigger_close_refresh(CFG, [self._close()])
         self.assertEqual(self.script_calls, [])
         self.assertTrue(any("CLOSE REFRESH SKIPPED" in n for n in self.notifications))
+
+    def test_swap_cap_does_not_block_close_refresh(self):
+        self._seed_scan()
+        now = dispatcher.time.time()
+        with open(self.state_path, "w") as fh:
+            json.dump({"timestamps": [now - i * 60 for i in range(8)]}, fh)
+        dispatcher._trigger_close_refresh(CFG, [self._close()])
+        # Separate caps: the exhausted swap cap does not consume the close cap.
+        self.assertTrue(self.script_calls)
 
     def test_depth_cap_blocks_close_refresh(self):
         self._seed_scan()

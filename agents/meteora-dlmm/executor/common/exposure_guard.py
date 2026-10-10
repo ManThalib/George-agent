@@ -493,6 +493,45 @@ def _scan_key(position: Dict[str, Any]) -> Tuple[str, str]:
             str(position.get("pool_address") or ""))
 
 
+def row_position_id(row: Dict[str, Any]) -> str:
+    """Position identity from a scan row, whatever key the screener used
+    (live 2026-10-10, bug #8: scan rows carry `position_address`/mint while
+    reconcile copied `position_id` and stored null, creating entries a close
+    can never match or remove)."""
+    for key in ("position_id", "position_address", "position_mint"):
+        value = str(row.get(key) or "")
+        if value:
+            return value
+    return ""
+
+
+def row_is_open(row: Dict[str, Any]) -> bool:
+    """True when a scan row represents a live, still-open position.
+
+    The screener keeps listing just-closed positions as rows with
+    status=closed and zero liquidity (live 2026-10-10, bug #4): treating
+    those as present made completed closes look incomplete and let
+    reconcile add phantom entries. A row marked closed is never open; a
+    row with an explicit zero liquidity AND a closed-ish status is not
+    either. Unknown status with no liquidity field stays conservatively
+    open (the rails must count what they cannot rule out).
+    """
+    status = str(row.get("status") or "").lower()
+    if status in {"closed", "closed_empty", "empty", "inactive"}:
+        return False
+    raw = row.get("liquidity_raw")
+    try:
+        if raw is not None and int(raw) == 0 and status in {"", "active", "open"}:
+            # Zero liquidity with no explicit closed marker: the position
+            # account still exists (rent not recovered) but holds nothing.
+            # Not a capital risk; not a phantom either until closed. Keep it
+            # visible to absence checks but out of exposure counting.
+            return False
+    except (TypeError, ValueError):
+        pass
+    return True
+
+
 def reconcile_positions(scan_positions: List[Dict[str, Any]],
                         scan_mtime: float = 0.0,
                         now: Optional[float] = None,
@@ -524,30 +563,54 @@ def reconcile_positions(scan_positions: List[Dict[str, Any]],
         report["skipped"] = "no positions in scan"
         return report
 
+    # Closed/zero-liquidity rows are not open positions (bug #4/#8): they
+    # must not be added as tracked entries and do not keep a pool 'present'.
+    scan_open = [p for p in scan_positions if row_is_open(p)]
+    if not scan_open:
+        report["skipped"] = "no open positions in scan"
+        return report
+
     path = Path(state_dir) / "exposure_state.json" if state_dir else None
     state = load_state(path)
     open_positions: List[Dict[str, Any]] = list(state.get("open_positions") or [])
-    tracked = {_scan_key(p) for p in open_positions}
 
-    for pos in scan_positions:
+    # Pool-level count matching (legacy-safe): tracked entries without a
+    # position id can only match by pool, so a pool is fully accounted for
+    # when the scan shows no more open rows than we already track. Surplus
+    # rows are added WITH their scan position id so future closes match.
+    tracked_by_pool: Dict[Tuple[str, str], int] = {}
+    for p in open_positions:
+        key = _scan_key(p)
+        tracked_by_pool[key] = tracked_by_pool.get(key, 0) + 1
+    scan_by_pool: Dict[Tuple[str, str], int] = {}
+    for p in scan_open:
+        key = _scan_key(p)
+        scan_by_pool[key] = scan_by_pool.get(key, 0) + 1
+    tracked_ids = {str(p.get("position_id") or "") for p in open_positions}
+    tracked_ids.discard("")
+
+    for pos in scan_open:
+        pid = row_position_id(pos)
+        if pid and pid in tracked_ids:
+            continue
         key = _scan_key(pos)
-        if key in tracked:
+        if tracked_by_pool.get(key, 0) >= scan_by_pool.get(key, 0):
             continue
         entry = {
             "pool_address": pos.get("pool_address"),
-            "position_id": pos.get("position_id"),
+            "position_id": pid or None,
             "wallet_id": pos.get("wallet_id") or "main",
             "position_usd": float(pos.get("position_usd") or 0.0),
             "opened_at": pos.get("opened_at") or datetime.now(timezone.utc).isoformat(),
             "source": "reconcile",
         }
         open_positions.append(entry)
-        tracked.add(key)
+        tracked_by_pool[key] = tracked_by_pool.get(key, 0) + 1
         report["added"].append(entry)
 
-    scan_keys = {_scan_key(p) for p in scan_positions}
+    scan_pools = {_scan_key(p) for p in scan_open}
     for p in open_positions:
-        if _scan_key(p) not in scan_keys:
+        if _scan_key(p) not in scan_pools:
             report["unmatched"].append({
                 "pool_address": p.get("pool_address"),
                 "wallet_id": p.get("wallet_id") or "main",

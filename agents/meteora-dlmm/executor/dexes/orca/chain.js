@@ -33,6 +33,14 @@ function withinOnePct(got, want) {
   return diff * 100n <= want;
 }
 
+// Requested amounts are DEPOSIT MAXES (live 2026-10-10, bug #11): the pool
+// takes what the range actually needs, so a straddle near a range edge
+// legitimately deposits far less than the max. Verify as an upper bound;
+// a zero/over deposit fails.
+function withinMax(got, want) {
+  return got * 100n <= want * 102n;
+}
+
 const Q64 = new Decimal(2).pow(64);
 
 function amountsForLiquidity(liquidityBn, tickLower, tickUpper, tickCurrent) {
@@ -71,8 +79,9 @@ async function verifyOpen(req, connection, wallet, positionMint, pool) {
     try {
       const tickCurrent = Number(pool.getData().tickCurrentIndex);
       const { amountX, amountY } = amountsForLiquidity(liquidity, tickLower, tickUpper, tickCurrent);
-      amounts_ok = withinOnePct(BigInt(amountX), BigInt(amount_x || "0"))
-        && withinOnePct(BigInt(amountY), BigInt(amount_y || "0"));
+      amounts_ok = liquidity.gt(new BN(0))
+        && withinMax(BigInt(amountX), BigInt(amount_x || "0"))
+        && withinMax(BigInt(amountY), BigInt(amount_y || "0"));
       derived = { derived_x_raw: amountX, derived_y_raw: amountY };
     } catch (err) {
       derived = { derived_error: err.message };

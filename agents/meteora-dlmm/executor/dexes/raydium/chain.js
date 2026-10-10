@@ -23,6 +23,14 @@ import { fetchUsdPrices, SOL_MINT } from "../../chain/prices.js";
 
 let raydiumCache = null;
 
+// Requested amounts are DEPOSIT MAXES (live 2026-10-10, bug #11): the pool
+// takes what the range actually needs, so a straddle near a range edge
+// legitimately deposits far less than the max. Verify as an upper bound;
+// a zero/over deposit fails.
+function withinMax(got, want) {
+  return got * 100n <= want * 102n;
+}
+
 async function getRaydium(connection, publicKey) {
   if (raydiumCache) return raydiumCache;
   raydiumCache = await Raydium.load({
@@ -171,8 +179,9 @@ async function verifyOpen(req, connection, wallet, nftMint, poolInfo) {
         liquidity,
         true,
       );
-      amounts_ok = withinOnePct(BigInt(amountA.toString()), BigInt(amount_x || "0"))
-        && withinOnePct(BigInt(amountB.toString()), BigInt(amount_y || "0"));
+      amounts_ok = liquidity.gt(new BN(0))
+        && withinMax(BigInt(amountA.toString()), BigInt(amount_x || "0"))
+        && withinMax(BigInt(amountB.toString()), BigInt(amount_y || "0"));
       derived = { derived_a_raw: amountA.toString(), derived_b_raw: amountB.toString() };
     } catch (err) {
       // Amount derivation is a best-effort cross-check; a math failure
