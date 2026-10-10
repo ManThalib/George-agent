@@ -35,14 +35,15 @@
     "max_raydium_range_width": 2000,
     "reject_active_bin_out_of_range_open": true
   },
-  "_comment_mutation": "add_liquidity deploys new capital and is guarded like an open (max_position_usd applies to tracked value + add, max_total_exposure_usd, max_daily_loss_usd, max_drawdown_pct). remove_liquidity is de-risking: always allowed, bps must be in [min_remove_bps, 9999]; bps>=10000 is a close. claim_fees/claim_rewards on raydium compute real pending via SDK math; a claim whose computed USD value is below claim_min_usd is skipped (reported, not sent) — gas-aware claiming rides on the same computed USD vs tx cost.",
+  "_comment_mutation": "add_liquidity deploys new capital and is guarded like an open (max_position_usd applies to tracked value + add, max_total_exposure_usd, max_daily_loss_usd, max_drawdown_pct). remove_liquidity is de-risking: always allowed, bps must be in [min_remove_bps, 9999]; bps>=10000 is a close. claim_fees/claim_rewards on raydium compute real pending via SDK math; a claim whose computed USD value is below claim_min_usd is skipped (reported, not sent) \u2014 gas-aware claiming rides on the same computed USD vs tx cost.",
   "_comment_preflight": "Live SOL/token preflight for opens (plan 03, Change B-D). George re-reads the wallet's real SOL + token balances immediately before simulating an open and rejects mechanically (INSUFFICIENT_SOL_FOR_OPEN / INSUFFICIENT_TOKEN_BALANCE) instead of relying on a raw Solana 'insufficient funds' error. sol_overhead_lamports is the per-DEX account/bin-array rent the opener funds (a floor, not an exact rent model). ata_rent_lamports is charged per token account the open must create.",
   "preflight": {
     "sol_overhead_lamports": {
-      "meteora": 45000000,
+      "meteora": 60000000,
       "orca": 30000000,
       "raydium": 30000000,
-      "default": 45000000
+      "default": 45000000,
+      "_comment_calibration": "2026-10-10 live-fire calibration (owner default #28): observed open overheads meteora 41.9M / orca 6.5M / raydium 18.4M lamports; meteora raised 45M->60M for bin-array-rent headroom; orca/raydium unchanged."
     },
     "ata_rent_lamports": 2039280,
     "base_fee_lamports": 5000,
