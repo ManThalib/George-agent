@@ -1,0 +1,21 @@
+{
+ "signal_id": "live-test-orca-open-2",
+ "action": "open",
+ "dex": "orca",
+ "created_at": "2026-10-10T08:18:28Z",
+ "pool_address": "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE",
+ "bin_range": {
+  "lower": -22088,
+  "upper": -22084
+ },
+ "liquidity": {
+  "amount_x": 110000000,
+  "amount_y": 11000000
+ },
+ "position_usd": 23.0,
+ "score": 97.0,
+ "score_model": "missy-default",
+ "score_version": 1,
+ "eligible": true,
+ "reason": "live-fire test: orca SOL/USDC (owner-authorized 2026-10-10)"
+}

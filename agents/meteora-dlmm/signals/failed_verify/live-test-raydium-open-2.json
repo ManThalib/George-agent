@@ -1,0 +1,21 @@
+{
+ "signal_id": "live-test-raydium-open-2",
+ "action": "open",
+ "dex": "raydium",
+ "created_at": "2026-10-10T13:51:45Z",
+ "pool_address": "3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv",
+ "bin_range": {
+  "lower": -22090,
+  "upper": -22082
+ },
+ "liquidity": {
+  "amount_x": 200000000,
+  "amount_y": 11000000
+ },
+ "position_usd": 22.0,
+ "score": 97.0,
+ "score_model": "missy-default",
+ "score_version": 1,
+ "eligible": true,
+ "reason": "live-fire test: raydium SOL/USDC two-sided (owner-authorized 2026-10-10)"
+}

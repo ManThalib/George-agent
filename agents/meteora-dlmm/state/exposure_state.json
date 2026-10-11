@@ -1,11 +1,25 @@
 {
   "open_positions": [
     {
-      "pool_address": "3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv",
-      "position_id": "CXBQbhJHHXJ13N73ji2cjh9v6v6FQzEaBjRRVK8gtgsQ",
-      "position_usd": 91.13019598188183,
-      "opened_at": "2026-10-02T22:44:33.908805+00:00",
-      "wallet_id": "main"
+      "pool_address": "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6",
+      "position_id": "G7GTkjUqzgiRkGSgh6hmhhdcxBJSm8c1BcU9rKRAQCz7",
+      "wallet_id": "main",
+      "position_usd": 100.0,
+      "opened_at": "2026-10-11T08:22:20.673833+00:00"
+    },
+    {
+      "pool_address": "GgoFghiA6Ca7YNmG6dRxwKQWkZhRK8ND47EREz46arot",
+      "position_id": "FQtGq7u538CtNz3Y8QmA3QnXejuXTQSAwbKNVCgja9RH",
+      "wallet_id": "main",
+      "position_usd": 100.0,
+      "opened_at": "2026-10-11T10:46:17.658287+00:00"
+    },
+    {
+      "pool_address": "3potGhhaNyzvCNq1CGh2wLbZLLMjpdPtG1Hpj8q2DDVR",
+      "position_id": "3YjJgeybs6ScLLTGt5raqYuckFw42Rje4JvaQMkT1mvt",
+      "wallet_id": "main",
+      "position_usd": 100.0,
+      "opened_at": "2026-10-11T11:06:00.988157+00:00"
     }
   ],
   "daily_loss_usd": 0.0,
