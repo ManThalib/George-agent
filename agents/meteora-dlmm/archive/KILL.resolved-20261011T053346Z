@@ -1,0 +1,30 @@
+SELF-HALT — written by George 2026-10-09T07:48+08:00 (2026-10-08T23:48Z)
+
+Reason: active key-custody compromise on the configured wallet
+QNsxSBe2tHb7RSQYh6TUBUQA2wD93PvPP5Jg3qUxPvj.
+
+Two unexplained drain waves signed by this wallet's key (no matching signal,
+no journal/ledger entry):
+  1) 2026-10-08 12:16:05-12:19:37Z  18,459,733 lamports -> 0 (100 USDC -> SOL, swept)
+  2) 2026-10-08 23:01:41-23:14:30Z  a further 80 USDC -> SOL, 0.680 SOL swept out
+
+The wallet now holds ~0.0443 SOL (attacker residue), enough to pay fees, and
+agent.mode is `auto`. Any future dispatcher run could therefore sign a
+transaction with a key demonstrably controlled by a third party.
+
+Halt per SAFETY_RAILS.md section 6. No transactions of any kind until this file
+is removed. Owner action required: confirm whether the activity above was
+authorized; if not, treat the key as compromised (rotate before funding).
+Remove this file only after the incident is resolved.
+
+
+== RESOLUTION 20261011T053346Z ==
+Incident INCIDENT-KEY-CUSTODY-20261008 resolved by owner authorization
+2026-10-11T05:29Z ("stop KILL state, start running like before").
+Verification before removal:
+  - SOLANA_AGENT_WALLET re-stored 2026-10-11T05:23Z; value CHANGED (sha256 differs
+    from pre-rotation); derives to new public key, matches SOLANA_PUBLIC_WALLET.
+  - executor config wallet.public_key aligned to the new key (backup kept).
+  - no open positions; signals/pending empty.
+  - pipeline automation cooper-scanner-protocol updated to the new wallet.
+Old wallet QNsxSBe... treated as burned; its remaining funds NOT swept by George.

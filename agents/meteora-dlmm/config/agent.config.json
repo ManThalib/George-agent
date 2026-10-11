@@ -12,7 +12,7 @@
     "version": "0.1.0"
   },
   "wallet": {
-    "public_key": "QNsxSBe2tHb7RSQYh6TUBUQA2wD93PvPP5Jg3qUxPvj",
+    "public_key": "B8qv53pKyW2sgP4VYik1GkkZ6NHNZZn6K5VTyVm55tTa",
     "_comment": "Public address — safe in files. Env var SOLANA_PUBLIC_WALLET overrides if set.",
     "_secret_key_handling": {
       "method": "openclaw_secrets_store",
