@@ -31,7 +31,7 @@ Current mode is set in `config/agent.config.json` → `agent.mode`.
 
 | Rail | Value | Meaning |
 |---|---|---|
-| `min_open_score` | **70.0** | Sheldon's per-pool opportunity score floor. An `open` signal must carry a `score` field ≥ this value. Missing score or below the floor is rejected. (Policy source: Sheldon `sheldon_policy.json` → `pool_eligibility.min_open_score`.) |
+| `min_open_score` | **70.0** | Sheldon's per-pool opportunity score floor. An `open` signal must carry a `score` field ≥ the effective threshold. Missing score or below the threshold is rejected. (Policy source: Sheldon `sheldon_policy.json` → `scoring.min_open_score`, legacy fallback `pool_eligibility.min_open_score`.) Adaptive signals may carry their own threshold in `score_policy.min_open_score`, clamped up to `min_open_score_adaptive_floor` (**55.0**) so a missing/buggy signal can never open below a safe minimum. |
 | `max_position_usd` | **100** | Hard cap on a single position's value at open. (Policy source: Sheldon policy manifest.) |
 | `min_position_usd` | **10** | Below this, fees likely eat the trade — reject. (Policy source: Sheldon policy manifest.) |
 
@@ -41,9 +41,9 @@ Current mode is set in `config/agent.config.json` → `agent.mode`.
 
 | Rail | Value | Meaning |
 |---|---|---|
-| `max_total_exposure_usd` | **300** | Sum of all open positions must never exceed this. |
-| `max_open_positions` | **3** | Across all pools. |
-| `max_daily_loss_usd` | **50** | Realized + estimated IL loss hits this → agent auto-pauses for the day. |
+| `max_total_exposure_usd` | **500** | Sum of all open positions must never exceed this. |
+| `max_open_positions` | **9** | Across all pools. |
+| `max_daily_loss_usd` | **10** | Realized + estimated IL loss hits this → agent auto-pauses for the day. |
 | `max_drawdown_pct` | **10** | Portfolio drawdown % from session high → auto-pause. |
 | `pause_after_consecutive_failures` | **3** | Failed txs in a row → self-pause, critical alert. |
 | `pause_on_rpc_error_streak` | **5** | Repeated RPC errors → stop instead of retrying into a wall. |
@@ -61,7 +61,10 @@ Auto-pause means: **no new opens**, closes still allowed (de-risking is always p
 | `priority_fee_cap_sol` | **0.0005** | Max priority fee per transaction. |
 | `tx_timeout_seconds` | **60** | Unconfirmed after this → treat as failed, reconcile before proceeding. |
 | `one_tx_at_a_time` | **true** | Never overlap in-flight transactions. |
-| `min_remove_bps` | **1** | Minimum partial removal (from `execution_guards` in `execution_limits.json`). |
+| `min_remove_bps` | **1** | Absolute minimum partial removal (from `execution_guards` in `execution_limits.json`). |
+| `partial_remove_bps_min` | **2500** | Partial removes below this are rejected — use a smaller rebalance or `close`. |
+| `partial_remove_bps_max` | **7500** | Partial removes above this are rejected — use `close`. Effective `remove_liquidity` window is **2500–7500** bps. |
+| `mutation_cooldown_hours` | **6** | Minimum hours between mutations (`add`/`remove`/`rebalance`/`rotate`) on the same `position_id`. |
 | `claim_min_usd` | **1.0** | Claims whose computed pending USD value is below this are skipped (reported, not sent) — gas-aware claiming. |
 
 Signal freshness: signals older than `signal_max_age_seconds` (**300s**, from
@@ -79,20 +82,25 @@ is required for `close`, `claim_fees`, `claim_rewards`, `add_liquidity`, and
 | `max_meteora_range_width` | **70** | Meteora `initializePositionAndAddLiquidityByStrategy` can only create ~70 bins in one transaction; this rail overrides `max_bin_range_width` for Meteora. |
 | `max_orca_range_width` | **2000** | Orca Whirlpool range-width cap. |
 | `max_raydium_range_width` | **2000** | Raydium CLMM range-width cap. |
-| `allowed_bin_steps` | **[4, 10, 20, 25, 50, 100]** | Meteora pool `bin_step` whitelist. Read from the pool's live on-chain account (never from signal metadata); fail-closed when the fetch fails. (Strategy source: Sheldon policy `pool_eligibility.allowed_bin_steps`.) |
+| `allowed_bin_steps` | **[4, 8, 10, 12, 15, 20, 25, 50, 100]** | Meteora pool `bin_step` whitelist. Read from the pool's live on-chain account (never from signal metadata); fail-closed when the fetch fails. (Strategy source: Sheldon policy `pool_eligibility.allowed_bin_steps`.) |
 | `reject_active_bin_out_of_range_open` | **true** | Don't open if price already outside the requested range. |
 
 **CLOSE actions bypass this section** — closing is de-risking and is always allowed (subject to mode + kill switch).
 
 ---
 
-## 5b. Modify actions (`add_liquidity` / `remove_liquidity`)
+## 5b. Modify actions (`add_liquidity` / `remove_liquidity` / `rebalance` / `rotate`)
 
-Added 2026-10-01. Both act on an **existing** position (`position_id` required).
+Added 2026-10-01 (`rebalance` / `rotate` added later). All act on an **existing** position (`position_id` required) and share two disciplines:
+
+- **Side discipline:** mutations of asymmetric positions declare `side` (`bidirectional` default, or `x` / `y`); the supplied `liquidity` must be consistent with the declared side or the signal is rejected.
+- **Mutation cooldown:** `mutation_cooldown_hours` (**6h**) must have passed since the last mutation on the same `position_id` (adds, removes, rebalances, rotates). Claims do **not** stamp the cooldown.
 
 | Rail | Value | Meaning |
 |---|---|---|
-| `min_remove_bps` | **1** | Minimum partial removal (from `execution_guards` in `execution_limits.json`). |
+| `min_remove_bps` | **1** | Absolute minimum partial removal (from `execution_guards` in `execution_limits.json`). |
+| `partial_remove_bps_min` | **2500** | Partial removes below this are rejected. |
+| `partial_remove_bps_max` | **7500** | Partial removes above this are rejected — a near-full removal is `close`'s job. |
 
 **`add_liquidity` rules:**
 - Signal must carry `position_id`, `pool_address`, `bin_range`, `liquidity {amount_x, amount_y}`, `position_usd`.
@@ -102,24 +110,33 @@ Added 2026-10-01. Both act on an **existing** position (`position_id` required).
 - `bps` field: n/a.
 
 **`remove_liquidity` rules:**
-- Signal must carry `position_id`, `pool_address`, `bps` (1–9999).
-- De-risking: exposure rails do **not** apply (same policy as close).
+- Signal must carry `position_id`, `pool_address`, `bps` (**2500–7500**).
+- De-risking: loss/drawdown/exposure rails do **not** apply (same policy as close) — but the cooldown, the partial-remove window, and the minimum-remaining rule below do.
 - `bps >= 10000` is rejected — a full removal is `close`'s job (remove + claim + close atomically).
+- When the signal carries `position_usd`, the remaining value after removal must stay ≥ `min_position_usd` (you cannot strip a position below minimum economic size).
 - Optional `claim_fees: true` sweeps accrued fees after the removal (failure does not undo the removal).
 - A position with zero liquidity is rejected — use `claim` or `close`.
+
+**`rebalance` / `rotate` rules:**
+- `rebalance` (same pool, new range) and `rotate` (different pool) both require `position_id`, `pool_address`, `bin_range`, `liquidity`, `position_usd`.
+- Guarded like an open on **net** exposure: current exposure − tracked old value + new `position_usd` must fit `max_total_exposure_usd`; new size must fit `[min_position_usd, max_position_usd]`; daily-loss and drawdown rails apply; mutation cooldown applies.
+- Range width obeys the per-DEX cap; the live-tick guard and live SOL/token preflight apply to the open leg (a close-only leg with no `liquidity` is never preflight-gated — de-risking first).
+- `rotate` / `rebalance` trigger the close-refresh chain at the epilogue (see §5c).
 
 **Exposure bookkeeping:** opens record `position_id` in `state/exposure_state.json`; adds grow the tracked `position_usd`, removes shrink it proportionally (`bps/10000`). Positions opened before 2026-10-01 have no `position_id` and are matched by pool address.
 
 ---
 
-## 5c. Claims, dust swaps, self-verification, mirrors, capital refresh
+## 5c. Claims, dust swaps, self-verification, mirrors, refresh chains, preflight
 
-Added 2026-10-03 (all already enforced in code; documented here so the law matches the machine).
+Added 2026-10-03; refresh-chain and preflight paragraphs extended 2026-10-10 (all already enforced in code; documented here so the law matches the machine).
 
 **Claim gating (`claim_fees` / `claim_rewards`):**
 - Raydium computes the real pending fees/rewards via SDK math; a claim whose
   computed USD value is below `claim_min_usd` (**$1.00**) is skipped (journaled as
   `skipped`, signal moves out of pending — it must not retry every cycle).
+- A claim never closes the position: it is recorded for observability only and does
+  not remove the entry from `state/exposure_state.json` nor stamp the mutation cooldown.
 - A skip is a working rail, not a failure. Mirror legs skip the same way and the
   divergence is recorded for the epilogue report.
 
@@ -134,8 +151,11 @@ Added 2026-10-03 (all already enforced in code; documented here so the law match
 **Self-verification:**
 - Every per-DEX chain handler returns a `verify` block. Opens and `add_liquidity`
   with a missing or failed block go to `signals/failed_verify/` (not `processed/`)
-  with an owner alert. Closes only warn — the execution already happened and is
-  journaled as executed.
+  with an owner alert, are journaled as `executed_unverified` (never plain
+  `executed` — downstream consumers must not read them as "capital deployed and
+  verified"), and do **not** occupy a tracked exposure slot (the reconcile pass
+  re-adds the position from a later scan if the deposit really landed). Closes
+  only warn — the execution already happened and is journaled as executed.
 
 **Multi-wallet mirror** (active only when `agent.config.json` → `wallet.mirrors` is non-empty):
 - The incoming signal IS the MAIN leg. Mirror legs are structural copies with
@@ -150,6 +170,42 @@ Added 2026-10-03 (all already enforced in code; documented here so the law match
   invocation. Bounded by **8 re-entries/hour** (`state/capital_reentry.json`) and a
   **chain depth of 3**; runs serialize on `state/dispatcher.lock` so a pending
   signal is never processed twice. Refresh failures never undo the swap.
+
+**Close-refresh chain** (after `close` / `rotate` / `rebalance` executes):
+- Position rescan (Missy's scan is the authoritative view of what still exists) →
+  wallet rescan → Sheldon re-entry → dispatcher follow-up. Bounded by **20
+  close re-entries/hour** (`close_timestamps` in the same state file) and the same
+  chain depth of 3.
+- A strict `close` whose position is **still present** in the fresh scan (or whose
+  absence could not be verified) blocks Sheldon re-entry — re-deciding on
+  unverified state is exactly the close→scan→close loop this forbids. The owner is
+  notified and the `--once` run exits non-zero so monitoring sees the incomplete cycle.
+- Journaled as `close_refresh` entries; refresh failures never undo the close.
+
+**Scheduling (per wake):**
+- Pending signals run in explicit priority order, not filename order: closes first,
+  then `rotate`/`rebalance`/`remove_liquidity`, then WSOL prep swaps (gas top-up),
+  then target-token prep swaps, then opens/adds, then dust, then claims — so a
+  backlog of stale preps can never delay a close.
+- Prep swaps are capped at **1 per wake** (`DEFAULT_MAX_PREPS_PER_RUN`, override via
+  `GEORGE_MAX_PREPS_PER_RUN`); closes and claims are never deferred. A prep that is
+  already stale never consumes a slot — it is rejected by validation either way.
+- Each wake first reconciles tracked exposure against the authoritative position
+  scan (additive only: unknown on-chain positions are added, tracked-but-absent
+  entries are kept — never silently dropped without a confirmed close). Stale scans
+  (>2h) are refused.
+
+**Live SOL/token preflight (opens, adds, rebalances, rotates):**
+- Immediately before simulation, George re-reads the wallet's **live** SOL and token
+  balances plus the pool's on-chain mints and rejects mechanically
+  (`INSUFFICIENT_SOL_FOR_OPEN` / `INSUFFICIENT_TOKEN_BALANCE` /
+  `PREFLIGHT_POOL_UNREADABLE` / `PREFLIGHT_UNAVAILABLE`) instead of surfacing a raw
+  Solana "insufficient funds" error. Fail-closed: unreadable live state blocks the open.
+- Requirement is DEX-aware (per-DEX rent overhead + reserve + fees + ATA rent for
+  token accounts the open must create + the SOL side of SOL-paired positions, offset
+  by any existing WSOL balance). Tunables live under `preflight` in
+  `execution_limits.json`. The `confirm_each` approve path re-runs preflight before
+  sending — a queued signal may no longer be funded when approved.
 
 ---
 

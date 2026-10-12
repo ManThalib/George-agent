@@ -30,12 +30,13 @@ agents/meteora-dlmm/
 ├── config/
 │   └── agent.config.json          # wallet, RPC, mode, mirrors
 ├── executor/
-│   ├── dispatcher.py              # main signal dispatch loop (+ capital-refresh chain)
-│   ├── chain/                     # Node chain layer (dispatch.js, tx.js, jupiter.js, prices.js)
+│   ├── dispatcher.py              # main signal dispatch loop (+ capital/close-refresh chains)
+│   ├── chain/                     # Node chain layer (dispatch.js, tx.js, jupiter.js, prices.js, common.js)
 │   ├── common/                    # shared executor helpers
 │   │   ├── signal_validator.py    # core validation (all actions)
 │   │   ├── rails_loader.py        # execution_limits.json + sheldon policy + SAFETY_RAILS.md
 │   │   ├── config_loader.py
+│   │   ├── live_preflight.py      # live SOL/token balance preflight for opens
 │   │   ├── journal.py
 │   │   ├── approvals.py           # confirm_each pending store
 │   │   ├── dust_queue.py          # swap_to_usdc review queue
@@ -76,8 +77,13 @@ agents/meteora-dlmm/
   Raydium computes real pending value and skips below `claim_min_usd` = $1.00)
 - `add_liquidity` — add to an existing position (requires `position_id`, `bin_range`,
   `liquidity`, `position_usd`; guarded like an open: exposure + range rails apply)
-- `remove_liquidity` — partial removal (requires `position_id`, `bps` 1–9999;
-  de-risking like close; `bps` ≥ 10000 is rejected — use `close`)
+- `remove_liquidity` — partial removal (requires `position_id`, `bps` 2500–7500;
+  de-risking like close; `bps` ≥ 10000 is rejected — use `close`; remaining value
+  must stay ≥ `min_position_usd`; 6h mutation cooldown applies)
+- `rebalance` — close range + reopen same pool (requires `position_id`, `bin_range`,
+  `liquidity`, `position_usd`; guarded on net exposure like an open)
+- `rotate` — close one position + open another pool (same required fields and
+  net-exposure guard as `rebalance`; triggers the close-refresh chain)
 - `swap` — Jupiter swap (requires `input_mint`, `output_mint`, `amount`)
 - `swap_to_usdc` — dust sweep to USDC (requires `mint`, `symbol`, `decimals`,
   `amount_raw`, `amount_ui`, `value_usd`, `reason`; auto-executes only in `auto` mode,
@@ -86,7 +92,11 @@ agents/meteora-dlmm/
 
 All non-swap signals carry `signal_id`, `action`, `created_at`; signals older than
 `signal_max_age_seconds` (300s) are rejected as stale. `position_id` is required for
-`close`, `claim_*`, `add_liquidity`, `remove_liquidity`.
+`close`, `claim_*`, `add_liquidity`, `remove_liquidity`, `rebalance`, `rotate`.
+Mutations accept an optional `side` (`bidirectional` default, or `x`/`y`) that must
+match the supplied liquidity; mutations on the same `position_id` are limited to one
+per 6h (`mutation_cooldown_hours`). `open` score uses an adaptive threshold
+(`score_policy.min_open_score` clamped to the 55.0 floor, default 70.0).
 
 ## Safety
 
@@ -95,11 +105,21 @@ All non-swap signals carry `signal_id`, `action`, `created_at`; signals older th
 - Max exposure, drawdown, slippage, and position-size rails are enforced
 - 3 consecutive failures → self-pause + critical alert
 - On-chain self-verification: opens/adds that fail verification move to
-  `signals/failed_verify/` + owner alert; closes only warn (execution already happened)
-- Claim gating: computed claim value below `claim_min_usd` is skipped, not sent
+  `signals/failed_verify/` + owner alert, journal as `executed_unverified`, and take
+  no exposure slot; closes only warn (execution already happened)
+- Claim gating: computed claim value below `claim_min_usd` is skipped, not sent;
+  claims never close the tracked position
+- Live preflight: opens/adds/rebalances/rotates re-check live SOL + token balances
+  before simulating (`INSUFFICIENT_SOL_FOR_OPEN` / `INSUFFICIENT_TOKEN_BALANCE`,
+  fail-closed when unreadable)
 - Capital-refresh chain: after a `swap` executes, the dispatcher rescans the wallet,
   re-runs Sheldon, and processes follow-up signals — bounded by 8 re-entries/hour
   and a chain depth of 3, serialized by `state/dispatcher.lock`
+- Close-refresh chain: after `close`/`rotate`/`rebalance`, the dispatcher rescans
+  positions + wallet and re-runs Sheldon (20/hour cap); a close still present in the
+  fresh scan blocks re-entry to avoid a close→scan→close loop
+- Scheduling: closes outrank preps outrank opens; prep swaps capped at 1/wake;
+  each wake reconciles tracked exposure against the authoritative position scan
 - Multi-wallet mirror (when `wallet.mirrors` is configured): MAIN leg runs first;
   mirror opens run only if MAIN succeeded, mirror closes/claims run regardless;
   divergence is recorded in `state/mirror_sync.json` and surfaced as drift

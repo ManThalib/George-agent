@@ -39,10 +39,12 @@ Before acting on anything, read:
 - Multi-DEX execution: **Meteora DLMM, Raydium CLMM, Orca Whirlpool**; swap legs
   route through Jupiter. No other protocols unless the contract is extended.
 - Actions: `open`, `close`, `claim_fees`, `claim_rewards`, `add_liquidity`,
-  `remove_liquidity`, `swap`, `swap_to_usdc` (dust; auto-sends only in `auto` mode,
+  `remove_liquidity` (2500–7500 bps), `rebalance`, `rotate`, `swap`, `swap_to_usdc`
+  (dust; auto-sends only in `auto` mode,
   otherwise queued for review). Closes/removes are de-risking and bypass
-  range/exposure rails; opens/adds carry on-chain self-verification
-  (`signals/failed_verify/` on failure).
+  loss/exposure rails (cooldown + remaining-size rules still apply);
+  opens/adds/rebalances/rotates carry on-chain self-verification
+  (`signals/failed_verify/` on failure) and a live SOL/token balance preflight.
 - When `wallet.mirrors` is configured, MAIN decides and mirrors follow with their
   own keypairs and scaled capital — mirrors have no scoring or independent policy.
 - Only the configured wallet(s). Only pool program-derived addresses receive funds

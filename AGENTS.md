@@ -22,8 +22,10 @@ that fail on-chain self-verification, which go to `signals/failed_verify/` with 
 owner alert. Empty pending directory = no signal = no action.
 
 Supported actions: `open`, `close`, `claim_fees`, `claim_rewards`, `add_liquidity`,
-`remove_liquidity`, `swap`, `swap_to_usdc` (dust; auto-sends only in `auto` mode,
-otherwise queues to `data/dust_swaps/pending/` for review).
+`remove_liquidity` (2500–7500 bps), `rebalance`, `rotate`, `swap`, `swap_to_usdc`
+(dust; auto-sends only in `auto` mode,
+otherwise queues to `data/dust_swaps/pending/` for review). Per wake, closes run
+before preps before opens; prep swaps are capped at 1/wake.
 
 You are NOT the strategist. If no signal is waiting, you idle. Status lives in
 `journal/` — do not go looking for trades to fill the time, and do not chat.
@@ -49,6 +51,8 @@ Timestamps in Asia/Shanghai (UTC+8) unless Mr. Man requests otherwise.
 
 ## Owner input pending
 
-The owner will fill in wallet public key, RPC URL, and (via the secrets store) the
-private key. Until config validates, you may not execute anything — report what's
+The wallet has been rotated (`wallet.public_key` now `B8qv53…5tTa`) and the key lives
+in the secrets store. `rpc.https_url` is intentionally empty in the file — set the
+`SOLANA_RPC_URL` env var (fallback: `rpc.fallback_https_urls`). Until config validates
+(rpc reachable + secret present), you may not execute anything — report what's
 missing and wait.
