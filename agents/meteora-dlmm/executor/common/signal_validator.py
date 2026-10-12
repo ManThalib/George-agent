@@ -10,6 +10,35 @@ from typing import Any, Dict, List, Optional
 
 from common.utils import load_json
 
+# --------------------------------------------------------------------------
+# In-wake caches for pool state (populated by dispatcher.run_once())
+# --------------------------------------------------------------------------
+_pool_mints_cache: Dict[tuple, Optional[tuple]] = {}
+_pool_tick_cache: Dict[tuple, Optional[int]] = {}
+
+
+def _cached_pool_mints(dex: str, pool_address: str) -> Optional[tuple]:
+    """Return (mint_x, mint_y) from cache, or None (populate cache miss)."""
+    key = (dex, pool_address)
+    if key in _pool_mints_cache:
+        return _pool_mints_cache[key]
+    # Not in cache — compute and cache the miss so we don't re-query.
+    from common.live_preflight import fetch_pool_mints  # circular‑import safe at module level
+    result = fetch_pool_mints(dex, pool_address)
+    _pool_mints_cache[key] = result
+    return result
+
+
+def _cached_pool_tick(dex: str, pool_address: str, rpc_url: str) -> Optional[int]:
+    """Return current tick from cache, or None (populate cache miss)."""
+    key = (dex, pool_address, rpc_url)
+    if key in _pool_tick_cache:
+        return _pool_tick_cache[key]
+    from common.live_preflight import fetch_pool_current_tick  # circular‑import safe
+    result = fetch_pool_current_tick(dex, pool_address, rpc_url)
+    _pool_tick_cache[key] = result
+    return result
+
 
 SUPPORTED_DEXES = {"meteora", "raydium", "orca"}
 REQUIRED_FIELDS = {"signal_id", "action", "created_at"}
@@ -300,7 +329,7 @@ def validate_core(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, 
         # on-chain bounds, so a stale signal cannot add to the wrong range.
         # Only enforced when the tick can be fetched; a fetch failure warns
         # instead of blocking execution.
-        tick = fetch_pool_current_tick(
+        tick = _cached_pool_tick(
             dex, signal.get("pool_address"), cfg.get("rpc_https_url")
         )
         if tick is None:

@@ -28,6 +28,18 @@ import json
 import urllib.request
 from typing import Any, Callable, Dict, Optional, Tuple
 
+# --------------------------------------------------------------------------
+# In-wake caches for pool state (populated by dispatcher.run_once())
+# --------------------------------------------------------------------------
+_pool_mints_cache: Dict[tuple, Optional[tuple]] = {}
+_pool_tick_cache: Dict[tuple, Optional[int]] = {}
+
+# --------------------------------------------------------------------------
+# In-wake caches for wallet balances (populated by dispatcher.run_once())
+# --------------------------------------------------------------------------
+_wallet_sol_cache: Dict[tuple, int] = {}
+_wallet_token_cache: Dict[tuple, Dict[str, int]] = {}
+
 
 WSOL_MINT = "So11111111111111111111111111111111111111112"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -280,26 +292,43 @@ def preflight_open(
 
     mints = _declared_mints(signal)
     if mints is None:
-        try:
-            mints = mints_fetcher(dex, pool_address, rpc_url, timeout)
-        except Exception as exc:
-            return _reject("preflight_sol", "PREFLIGHT_POOL_UNREADABLE", error=str(exc))
-        if mints is None:
-            return _reject(
-                "preflight_sol", "PREFLIGHT_POOL_UNREADABLE",
-                error=(f"cannot read live pool mints for dex={dex} "
-                       f"pool={pool_address}; refusing to open with the "
-                       "SOL/token requirement unverified"),
-            )
-    mint_x, mint_y = mints
+        # Check cache first (keyed by dex + pool_address)
+        cache_key = (dex, pool_address)
+        if cache_key in _pool_mints_cache:
+            mints = _pool_mints_cache[cache_key]
+        else:
+            try:
+                mints = mints_fetcher(dex, pool_address, rpc_url, timeout)
+            except Exception as exc:
+                return _reject("preflight_sol", "PREFLIGHT_POOL_UNREADABLE", error=str(exc))
+            if mints is None:
+                _pool_mints_cache[cache_key] = None  # mark as tried
+                return _reject(
+                    "preflight_sol", "PREFLIGHT_POOL_UNREADABLE",
+                    error=(f"cannot read live pool mints for dex={dex} "
+                           f"pool={pool_address}; refusing to open with the "
+                           "SOL/token requirement unverified"),
+                )
+            _pool_mints_cache[cache_key] = mints  # cache the successful result
+        mint_x, mint_y = mints
 
     try:
-        native_lamports = int(sol_fetcher(rpc_url, wallet, timeout))
+        cache_key = (rpc_url, wallet)
+        if cache_key in _wallet_sol_cache:
+            native_lamports = _wallet_sol_cache[cache_key]
+        else:
+            native_lamports = int(sol_fetcher(rpc_url, wallet, timeout))
+            _wallet_sol_cache[cache_key] = native_lamports
     except Exception as exc:
         return _reject("preflight_sol", "PREFLIGHT_UNAVAILABLE",
                        error=f"live SOL balance unavailable: {exc}")
     try:
-        token_balances = tokens_fetcher(rpc_url, wallet, timeout)
+        cache_key = (rpc_url, wallet)
+        if cache_key in _wallet_token_cache:
+            token_balances = _wallet_token_cache[cache_key]
+        else:
+            token_balances = tokens_fetcher(rpc_url, wallet, timeout)
+            _wallet_token_cache[cache_key] = token_balances
     except Exception as exc:
         return _reject("preflight_sol", "PREFLIGHT_UNAVAILABLE",
                        error=f"live token balances unavailable: {exc}")

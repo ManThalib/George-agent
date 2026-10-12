@@ -41,6 +41,19 @@ from common.signal_validator import (
     signal_age_seconds,
     validate_core,
 )
+
+
+# --------------------------------------------------------------------------
+# In-wake rails hash cache (avoid re-hashing SAFETY_RAILS.md per signal)
+# --------------------------------------------------------------------------
+_rails_hash_cache: Dict[str, str] = {}
+
+
+def _cached_rails_hash(rails_path: str) -> str:
+    """Return cached rails hash, computing once per process lifetime."""
+    if rails_path not in _rails_hash_cache:
+        _rails_hash_cache[rails_path] = rails_hash(Path(rails_path))
+    return _rails_hash_cache[rails_path]
 from common.chain_client import ChainError, simulate as chain_simulate, send as chain_send
 from common import live_preflight
 from common import mirror
@@ -1183,7 +1196,7 @@ def _trigger_close_refresh(cfg: Dict[str, Any], closes: List[Dict[str, Any]]) ->
                   "sheldon": sheldon_result,
                   "followup": followup_result,
                   "depth": depth},
-                rails_hash(RAILS_PATH),
+                _cached_rails_hash(str(RAILS_PATH)),
             )
         except Exception as exc:
             print(f"[{utc_now()}] close refresh journal failed: {exc}")
@@ -1348,7 +1361,7 @@ def process_signal_path(signal_path: Path, cfg: Dict[str, Any], rails: Dict[str,
         signal=signal,
         decision=journal_status,
         details=details,
-        rails_hash=rails_hash(RAILS_PATH),
+        rails_hash=_cached_rails_hash(str(RAILS_PATH)),
     )
     if status == "executed":
         try:
@@ -1392,7 +1405,7 @@ def do_approve(signal_id: str, cfg: Dict[str, Any], rails: Dict[str, Any]) -> No
             signal=signal,
             decision="rejected",
             details=reject,
-            rails_hash=rails_hash(RAILS_PATH),
+            rails_hash=_cached_rails_hash(str(RAILS_PATH)),
         )
         approvals_store.move_to(signal_id, approvals_store.REJECTED_DIR)
         print(f"Approval rejected: live preflight failed: {json.dumps(reject, default=str)}")
@@ -1403,7 +1416,7 @@ def do_approve(signal_id: str, cfg: Dict[str, Any], rails: Dict[str, Any]) -> No
         signal=signal,
         decision=decision,
         details=details,
-        rails_hash=rails_hash(RAILS_PATH),
+        rails_hash=_cached_rails_hash(str(RAILS_PATH)),
     )
     if decision == "executed":
         try:
@@ -1457,7 +1470,7 @@ def do_reject(signal_id: str, cfg: Dict[str, Any], rails: Dict[str, Any]) -> Non
         signal=record["signal"],
         decision="rejected_by_owner",
         details={"reason": "owner rejected approval"},
-        rails_hash=rails_hash(RAILS_PATH),
+        rails_hash=_cached_rails_hash(str(RAILS_PATH)),
     )
     print(f"{signal_id} -> rejected by owner")
 
@@ -1543,7 +1556,7 @@ def do_sweep_dust_swaps(cfg: Dict[str, Any], rails: Dict[str, Any]) -> None:
             signal=signal,
             decision=status,
             details=details,
-            rails_hash=rails_hash(RAILS_PATH),
+            rails_hash=_cached_rails_hash(str(RAILS_PATH)),
         )
         if status == "executed":
             try:
