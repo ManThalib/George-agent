@@ -235,8 +235,9 @@ class TestRailLoad(unittest.TestCase):
         # Sheldon Phase 2 moved min_open_score from pool_eligibility to the
         # scoring block; the loader must follow or the executor silently
         # falls back to DEFAULT_RAILS and drifts from the producer.
+        # 90 = owner decision #29 (2026-10-10), Sheldon policy v2.
         rails = load_rails()
-        self.assertEqual(float(rails.get("min_open_score", 0.0)), 70.0)
+        self.assertEqual(float(rails.get("min_open_score", 0.0)), 90.0)
         self.assertEqual(rails.get("scoring_source"), "missy")
 
 
