@@ -17,14 +17,15 @@ _pool_mints_cache: Dict[tuple, Optional[tuple]] = {}
 _pool_tick_cache: Dict[tuple, Optional[int]] = {}
 
 
-def _cached_pool_mints(dex: str, pool_address: str) -> Optional[tuple]:
+def _cached_pool_mints(dex: str, pool_address: str, rpc_url: str,
+                       timeout: float = 10.0) -> Optional[tuple]:
     """Return (mint_x, mint_y) from cache, or None (populate cache miss)."""
     key = (dex, pool_address)
     if key in _pool_mints_cache:
         return _pool_mints_cache[key]
     # Not in cache — compute and cache the miss so we don't re-query.
     from common.live_preflight import fetch_pool_mints  # circular‑import safe at module level
-    result = fetch_pool_mints(dex, pool_address)
+    result = fetch_pool_mints(dex, pool_address, rpc_url, timeout)
     _pool_mints_cache[key] = result
     return result
 
@@ -34,7 +35,9 @@ def _cached_pool_tick(dex: str, pool_address: str, rpc_url: str) -> Optional[int
     key = (dex, pool_address, rpc_url)
     if key in _pool_tick_cache:
         return _pool_tick_cache[key]
-    from common.live_preflight import fetch_pool_current_tick  # circular‑import safe
+    # fetch_pool_current_tick lives in this module (defined below); the
+    # module-global lookup resolves at call time, so tests patching
+    # common.signal_validator.fetch_pool_current_tick keep working.
     result = fetch_pool_current_tick(dex, pool_address, rpc_url)
     _pool_tick_cache[key] = result
     return result

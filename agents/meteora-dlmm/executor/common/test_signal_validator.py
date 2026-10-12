@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from common import signal_validator  # noqa: E402
 from common.signal_validator import SignalValidationError, validate_core  # noqa: E402
 
 
@@ -42,6 +43,12 @@ def _open_signal(lower, upper, dex="orca", score=72.0):
 
 
 class TickContainmentGuardTests(unittest.TestCase):
+    def setUp(self):
+        # The validator caches pool ticks in-wake; clear per test so mocked
+        # fetch values never leak across tests sharing a pool address.
+        signal_validator._pool_tick_cache.clear()
+        signal_validator._pool_mints_cache.clear()
+
     @patch("common.signal_validator.fetch_pool_current_tick", return_value=26191)
     def test_range_containing_tick_passes(self, _mock):
         signal = validate_core(_open_signal(26000, 26400), CFG, RAILS)

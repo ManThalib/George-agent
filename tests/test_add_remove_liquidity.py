@@ -76,6 +76,12 @@ CFG = {
 
 
 class TestAddRemoveValidator(unittest.TestCase):
+    def setUp(self):
+        # The validator caches pool ticks in-wake; clear per test so mocked
+        # fetch values never leak across tests sharing a pool address.
+        signal_validator._pool_tick_cache.clear()
+        signal_validator._pool_mints_cache.clear()
+
     def test_add_valid(self):
         with patch.object(signal_validator, "fetch_pool_current_tick", return_value=-2127):
             out = validate_core(_valid_add(), CFG, RAILS)
