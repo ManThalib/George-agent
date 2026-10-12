@@ -505,6 +505,24 @@ def row_position_id(row: Dict[str, Any]) -> str:
     return ""
 
 
+def row_position_usd(row: Dict[str, Any]) -> float:
+    """USD value of a scan row, whatever key the screener used.
+
+    Bug #23 (live 2026-10-12): Missy position scans carry
+    `current_value_usd` while reconcile/backfill read only `position_usd`,
+    so real ~$100 positions were tracked as $0.00 entries and total USD
+    exposure was understated against max_total_exposure_usd.
+    """
+    for key in ("position_usd", "current_value_usd"):
+        value = row.get(key)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+    return 0.0
+
+
 def row_is_open(row: Dict[str, Any]) -> bool:
     """True when a scan row represents a live, still-open position.
 
@@ -600,7 +618,7 @@ def reconcile_positions(scan_positions: List[Dict[str, Any]],
             "pool_address": pos.get("pool_address"),
             "position_id": pid or None,
             "wallet_id": pos.get("wallet_id") or "main",
-            "position_usd": float(pos.get("position_usd") or 0.0),
+            "position_usd": row_position_usd(pos),
             "opened_at": pos.get("opened_at") or datetime.now(timezone.utc).isoformat(),
             "source": "reconcile",
         }
@@ -637,9 +655,9 @@ def backfill_from_scan(scan_positions: List[Dict[str, Any]],
     """
     entries = [{
         "pool_address": p.get("pool_address"),
-        "position_id": p.get("position_id"),
+        "position_id": row_position_id(p) or None,
         "wallet_id": p.get("wallet_id") or "main",
-        "position_usd": float(p.get("position_usd") or 0.0),
+        "position_usd": row_position_usd(p),
         "opened_at": p.get("opened_at") or datetime.now(timezone.utc).isoformat(),
         "source": "backfill",
     } for p in (scan_positions or [])]

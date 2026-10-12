@@ -178,6 +178,21 @@ class ReconcilePositionsTests(unittest.TestCase):
         state = exposure_guard.load_state(path=self.state_path)
         self.assertEqual(state["open_positions"], [])
 
+    def test_reconcile_reads_current_value_usd(self):
+        # Bug #23 (live 2026-10-12): Missy scans carry current_value_usd, not
+        # position_usd; reconcile stored 0.0 and understated total exposure.
+        self._make_state([])
+        scan = [{"pool_address": "poolM", "status": "active",
+                 "wallet_id": "main", "position_address": "pdaM",
+                 "current_value_usd": 100.31}]
+        now = time.time()
+        report = exposure_guard.reconcile_positions(
+            scan, scan_mtime=now - 60, now=now, state_dir=self.state_dir)
+        self.assertEqual(len(report["added"]), 1)
+        self.assertEqual(report["added"][0]["position_usd"], 100.31)
+        state = exposure_guard.load_state(path=self.state_path)
+        self.assertEqual(state["open_positions"][0]["position_usd"], 100.31)
+
 
 class BackfillTests(unittest.TestCase):
     def setUp(self):
@@ -220,6 +235,21 @@ class BackfillTests(unittest.TestCase):
         self.assertEqual(report["written"], True)
         state = exposure_guard.load_state(path=state_path)
         self.assertEqual(state["open_positions"][0]["pool_address"], "pool1")
+
+    def test_backfill_reads_current_value_usd_and_position_address(self):
+        # Bug #23 + #8-class copy: backfill must take USD from
+        # current_value_usd and identity from position_address, like
+        # reconcile does.
+        state_path = os.path.join(self.state_dir, "exposure_state.json")
+        exposure_guard.save_state({"open_positions": []}, path=state_path)
+        scan = [{"pool_address": "poolM", "status": "active",
+                 "wallet_id": "main", "position_address": "pdaM",
+                 "current_value_usd": 102.63}]
+        report = exposure_guard.backfill_from_scan(scan, state_dir=self.state_dir,
+                                                    dry_run=False)
+        entry = report["after"][0]
+        self.assertEqual(entry["position_usd"], 102.63)
+        self.assertEqual(entry["position_id"], "pdaM")
 
 
 if __name__ == "__main__":
