@@ -1,0 +1,26 @@
+{
+  "signal_id": "sheldon-1791755105-1",
+  "action": "open",
+  "dex": "orca",
+  "wallet_id": "main",
+  "pool_address": "2TAgfogn8JRwwTnsGKUa6WUT5Xdv1iMEzfEDMor68X9C",
+  "side": "bidirectional",
+  "bin_range": {
+    "lower": -47342,
+    "upper": -47322
+  },
+  "liquidity": {
+    "amount_x": "263738286",
+    "amount_y": "2319346"
+  },
+  "position_usd": 58.29337200302817,
+  "score": 96.20111319554553,
+  "score_policy": {
+    "source": "missy",
+    "version": 1,
+    "min_open_score": 90.0
+  },
+  "max_slippage_bps": 100,
+  "reason": "OPEN score=96.20111319554553 threshold=90.0 dex=orca position_usd=58.29 center=-47332",
+  "created_at": "2026-10-12T05:45:05+08:00"
+}
