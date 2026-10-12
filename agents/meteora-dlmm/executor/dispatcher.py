@@ -965,6 +965,11 @@ def _handle_swap_to_usdc(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dic
 def process_signal(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     action = signal.get("action")
 
+    # Per-signal cache boundary: a mid-wake swap changes real balances, so
+    # every signal must see fresh live state in its preflight (not whatever
+    # an earlier leg of this wake cached).
+    live_preflight.clear_preflight_caches()
+
     if action == "swap_to_usdc":
         if cfg.get("mode") == "auto":
             return _handle_swap_to_usdc(signal, cfg, rails)

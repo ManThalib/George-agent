@@ -76,6 +76,13 @@ def open_signal(amount_x="0", amount_y="0", **extra):
 
 
 class MatrixGeorgeTests(unittest.TestCase):
+
+    def setUp(self):
+        # Pool-mints cache is keyed by (dex, pool); these cases reuse one
+        # pool address with different fake mint tuples, so drop the cache
+        # between calls to model distinct pools.
+        lp.clear_preflight_caches()
+
     def _preflight(self, signal, native, tokens, mints):
         sol, tok, mints_f = fetchers(native, tokens, mints)
         return lp.preflight_open(signal, CFG, RAILS,
@@ -103,7 +110,9 @@ class MatrixGeorgeTests(unittest.TestCase):
         # ...but the same balance fails a WSOL-paired open: the position's
         # SOL side joins the requirement, itemized as sol_topup.
         ok_wsol, details = self._preflight(
-            open_signal("1000000", "50000000"), 60_000_000,
+            open_signal("1000000", "50000000",
+                        pool_address="WSOLPOOLADDRESS11111111111111111111111"),
+            60_000_000,
             {TOKEN_B: 500_000_000}, (TOKEN_B, WSOL))
         self.assertFalse(ok_wsol)
         self.assertEqual(details["error_code"], "INSUFFICIENT_SOL_FOR_OPEN")

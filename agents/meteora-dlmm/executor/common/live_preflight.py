@@ -41,6 +41,19 @@ _wallet_sol_cache: Dict[tuple, int] = {}
 _wallet_token_cache: Dict[tuple, Dict[str, int]] = {}
 
 
+def clear_preflight_caches() -> None:
+    """Drop all in-wake caches.
+
+    Called by the dispatcher after each processed signal: a mid-wake swap
+    changes real SOL/USDC balances, so a later open in the same wake must
+    re-read live state, not spend a previous leg's balances twice.
+    """
+    _pool_mints_cache.clear()
+    _pool_tick_cache.clear()
+    _wallet_sol_cache.clear()
+    _wallet_token_cache.clear()
+
+
 WSOL_MINT = "So11111111111111111111111111111111111111112"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
@@ -292,14 +305,23 @@ def preflight_open(
 
     mints = _declared_mints(signal)
     if mints is None:
-        # Check cache first (keyed by dex + pool_address)
+        # Check cache first (keyed by dex + pool_address). A cached value of
+        # None means "tried and unreadable" within this wake: fail closed.
         cache_key = (dex, pool_address)
         if cache_key in _pool_mints_cache:
             mints = _pool_mints_cache[cache_key]
+            if mints is None:
+                return _reject(
+                    "preflight_sol", "PREFLIGHT_POOL_UNREADABLE",
+                    error=(f"cannot read live pool mints for dex={dex} "
+                           f"pool={pool_address}; refusing to open with the "
+                           "SOL/token requirement unverified"),
+                )
         else:
             try:
                 mints = mints_fetcher(dex, pool_address, rpc_url, timeout)
             except Exception as exc:
+                _pool_mints_cache[cache_key] = None  # mark as tried
                 return _reject("preflight_sol", "PREFLIGHT_POOL_UNREADABLE", error=str(exc))
             if mints is None:
                 _pool_mints_cache[cache_key] = None  # mark as tried
@@ -310,25 +332,19 @@ def preflight_open(
                            "SOL/token requirement unverified"),
                 )
             _pool_mints_cache[cache_key] = mints  # cache the successful result
-        mint_x, mint_y = mints
+    mint_x, mint_y = mints
 
+    # Balances are never cached: a mid-wake swap (or another open's deposit)
+    # changes real SOL/USDC state, and preflighting a later signal against a
+    # previous leg's balances would double-spend the same lamports on paper
+    # and let a real shortfall reach simulation. Live read, every time.
     try:
-        cache_key = (rpc_url, wallet)
-        if cache_key in _wallet_sol_cache:
-            native_lamports = _wallet_sol_cache[cache_key]
-        else:
-            native_lamports = int(sol_fetcher(rpc_url, wallet, timeout))
-            _wallet_sol_cache[cache_key] = native_lamports
+        native_lamports = int(sol_fetcher(rpc_url, wallet, timeout))
     except Exception as exc:
         return _reject("preflight_sol", "PREFLIGHT_UNAVAILABLE",
                        error=f"live SOL balance unavailable: {exc}")
     try:
-        cache_key = (rpc_url, wallet)
-        if cache_key in _wallet_token_cache:
-            token_balances = _wallet_token_cache[cache_key]
-        else:
-            token_balances = tokens_fetcher(rpc_url, wallet, timeout)
-            _wallet_token_cache[cache_key] = token_balances
+        token_balances = tokens_fetcher(rpc_url, wallet, timeout)
     except Exception as exc:
         return _reject("preflight_sol", "PREFLIGHT_UNAVAILABLE",
                        error=f"live token balances unavailable: {exc}")
