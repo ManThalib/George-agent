@@ -13,11 +13,11 @@
   },
   "wallet": {
     "public_key": "B8qv53pKyW2sgP4VYik1GkkZ6NHNZZn6K5VTyVm55tTa",
-    "_comment": "Public address — safe in files. Env var SOLANA_PUBLIC_WALLET overrides if set.",
+    "_comment": "Public address \u2014 safe in files. Env var SOLANA_PUBLIC_WALLET overrides if set.",
     "_secret_key_handling": {
       "method": "openclaw_secrets_store",
       "secret_ref": "SOLANA_AGENT_WALLET",
-      "how": "Say 'store the wallet key' in chat. Jarvis will request it via a masked secret prompt — the private key is never visible in chat, logs, or files.",
+      "how": "Say 'store the wallet key' in chat. Jarvis will request it via a masked secret prompt \u2014 the private key is never visible in chat, logs, or files.",
       "never": "Do NOT paste the private key into this file or into chat."
     },
     "mirrors": [],
