@@ -19,3 +19,7 @@ agents/meteora-dlmm/KILL
 .env
 .env.*
 *.key
+
+# Runtime backup files
+*.bak
+*.bak-*
