@@ -1,0 +1,26 @@
+{
+  "signal_id": "sheldon-1791987592-2",
+  "action": "open",
+  "dex": "meteora",
+  "wallet_id": "main",
+  "pool_address": "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6",
+  "side": "bidirectional",
+  "bin_range": {
+    "lower": -5684,
+    "upper": -5616
+  },
+  "liquidity": {
+    "amount_x": "313346044",
+    "amount_y": "32711495"
+  },
+  "position_usd": 65.40727770077339,
+  "score": 96.12989112907897,
+  "score_policy": {
+    "source": "missy",
+    "version": 1,
+    "min_open_score": 90.0
+  },
+  "max_slippage_bps": 100,
+  "reason": "OPEN score=96.12989112907897 threshold=90.0 dex=meteora position_usd=65.41 center=-5650",
+  "created_at": "2026-10-14T22:19:52+08:00"
+}
