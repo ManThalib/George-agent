@@ -12,11 +12,19 @@ const DLMM = require("@meteora-ag/dlmm");
 const StrategyType = DLMM.StrategyType;
 
 function withinOnePct(got, want) {
-  // Compare BigInt raw amounts with a 1% tolerance. A zero request must
-  // stay zero: any deposit on that side means the wrong token went in.
-  if (want === 0n) return got === 0n;
-  const diff = got > want ? got - want : want - got;
-  return diff * 100n <= want;
+  // Compare BigInt raw amounts with tolerance. A zero request must stay
+  // zero: any deposit on that side means the wrong token went in.
+  // Band is 10% per side (was 1%): between Sheldon's quote and execution
+  // the pair price moves; live 2026-10-16 a CORRECT open deposited
+  // x +3.85% / y -3.85% and the 1% band flagged it amounts_ok:false.
+  // Wrong-side deposits (sign flips, zero-request violations) still fail
+  // hard; George's swap slippage caps are unchanged.
+  const AMOUNTS_BAND_PCT = 10n;
+  if (got > 0n && want > 0n) {
+    const diff = got > want ? got - want : want - got;
+    return diff * 100n <= want * AMOUNTS_BAND_PCT;
+  }
+  return got === want; // both zero, or one side zero where request zero/nonzero
 }
 
 async function verifyOpen(req, connection, wallet, positionPubKey) {

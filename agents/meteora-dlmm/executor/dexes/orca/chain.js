@@ -69,8 +69,16 @@ async function verifyOpen(req, connection, wallet, positionMint, pool) {
     const data = position.getData();
     const tickLower = Number(data.tickLowerIndex);
     const tickUpper = Number(data.tickUpperIndex);
-    const expectedLower = Math.round(Number(req.bin_range?.lower ?? NaN));
-    const expectedUpper = Math.round(Number(req.bin_range?.upper ?? NaN));
+    // Compare against the SAME tick-grid-aligned bounds the open path
+    // executes (alignTick = round to tickSpacing multiple). Strict
+    // equality against the raw requested bounds false-alarmed every open
+    // whose bounds snapped ±spacing (live 2026-10-16: requested
+    // -22802/-22522, correctly executed -22800/-22520, verify said
+    // range_ok:false).
+    const tickSpacing = Number(pool.getData().tickSpacing);
+    const alignTick = (t) => Math.round(Number(t) / tickSpacing) * tickSpacing;
+    const expectedLower = alignTick(req.bin_range?.lower ?? NaN);
+    const expectedUpper = alignTick(req.bin_range?.upper ?? NaN);
     const range_ok = tickLower === expectedLower && tickUpper === expectedUpper;
     const liquidity = new BN(data.liquidity.toString());
     const { amount_x = "0", amount_y = "0" } = req.liquidity || {};

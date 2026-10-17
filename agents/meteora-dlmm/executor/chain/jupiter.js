@@ -132,6 +132,24 @@ export async function swap(req, connection, wallet) {
     return { tx_base64: [txToBase64(tx)], simulation: sim, notes };
   }
 
+  // Simulate the EXACT transaction about to be broadcast (2026-10-17
+  // fix, Whirlpool Custom 6024 'InvalidTokenMintOrder'): the Python-side
+  // chain_simulate pass runs this whole function again with mode=simulate,
+  // which fetches a FRESH quote — a different tx from the one sent after.
+  // A route valid at quote time N can be invalid at N+1 (route includes a
+  // Whirlpool pool whose mint order no longer matches), and that tx went
+  // on-chain unsimulated, 5x in one window. Simulating here closes that
+  // gap: a deterministic program error now fails BEFORE any fee is spent
+  // or broadcast happens.
+  const preflight = await simulate(connection, tx);
+  if (!preflight.ok) {
+    throw new Error(`swap pre-send simulation failed: ${JSON.stringify({
+      err: preflight.err,
+      logs: (preflight.logs || []).slice(-6),
+      route: routeLabels || "n/a",
+    })}`);
+  }
+
   const { signature, slot, confirmed_via, fallback_broadcast } = await signAndSend(connection, tx, wallet, []);
   return {
     signature,

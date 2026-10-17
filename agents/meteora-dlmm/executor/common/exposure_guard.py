@@ -487,6 +487,35 @@ def load_scan_positions(positions_dir: Optional[str] = None,
             and p.get("status") != "closed"], mtime
 
 
+def scan_history_complete(positions_dir: Optional[str] = None,
+                          prefix: str = "position_scan") -> bool:
+    """True when the newest scan declares complete walk history.
+
+    Missy position scanners stamp ``history_complete`` after a full walk;
+    a partial scan (RPC failure mid-walk) must never drive removals in
+    reconcile_positions — absence is only evidence when the walk was
+    complete. Defaults to True when the flag is missing (older scans),
+    matching the pre-flag behavior of the absence checks.
+    """
+    import glob
+
+    directory = positions_dir or POSITION_SCAN_DIR
+    paths = sorted(
+        (p for p in glob.glob(os.path.join(directory, prefix + "-*.json"))
+         if not p.endswith((".failed", ".invalid"))),
+        key=os.path.getmtime,
+    )
+    if not paths:
+        return False
+    try:
+        with open(paths[-1], "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return False
+    flag = data.get("history_complete") if isinstance(data, dict) else None
+    return True if flag is None else bool(flag)
+
+
 def _scan_key(position: Dict[str, Any]) -> Tuple[str, str]:
     """(wallet_id, pool_address) identity for a scan or tracked position."""
     return (str(position.get("wallet_id") or "main"),
@@ -555,22 +584,35 @@ def reconcile_positions(scan_positions: List[Dict[str, Any]],
                         now: Optional[float] = None,
                         max_age_seconds: float = MAX_SCAN_AGE_SECONDS,
                         state_dir: Optional[str] = None,
-                        dry_run: bool = False) -> Dict[str, Any]:
-    """Add on-chain positions missing from the tracked exposure state.
+                        dry_run: bool = False,
+                        history_complete: bool = True) -> Dict[str, Any]:
+    """Reconcile tracked exposure entries against the authoritative scan.
 
-    Additive and conservative by design:
-      - A non-closed position present in the authoritative scan but absent
-        from open_positions is ADDED (the rails must count it).
-      - A tracked position absent from the scan is reported as 'unmatched'
-        and LEFT IN PLACE. Removing it without a confirmed close would
-        loosen the rails — exactly the defect this reconciliation fixes.
+    Evidence-based (2026-10-17, exposure-blind defect): the previous pass
+    was additive-only with pool-COUNT matching, so a close+reopen on the
+    same pool kept the dead entry alive and never tracked the replacement
+    (live 2026-10-16/17: B5EwJVDuAauzUE tracked a closed position while the
+    live $81.79 position was invisible; 3ucNos4NbumP sat at $0.0; a closed
+    2TAgfogn8JRw entry still carried $22.37). Now:
 
-    A stale scan is refused (skipped) so a lagging scan cannot mis-count.
+      - A tracked entry whose position_id is ABSENT from a fresh,
+        history-complete scan is REMOVED on that evidence (and logged in
+        report['removed']). Absence from a complete scan is the same
+        evidence the close-settlement rail already trusts.
+      - A tracked pool whose live position id differs from the tracked one
+        is UPDATED IN PLACE (rebalance replacement), not added alongside.
+      - position_usd is refreshed from the scan for matched entries.
+      - id-less legacy entries keep the old pool-count fallback and are
+        never removed by this pass.
+
+    A stale or incomplete scan is refused (skipped) so a lagging or
+    partial scan cannot mis-count in either direction.
     Returns a report dict describing every change (for logging).
     """
     now = now if now is not None else datetime.now(timezone.utc).timestamp()
     report: Dict[str, Any] = {
-        "skipped": None, "added": [], "unmatched": [],
+        "skipped": None, "added": [], "updated": [], "removed": [],
+        "unmatched": [],
         "scan_size": len(scan_positions or []), "scan_mtime": scan_mtime,
     }
     if scan_mtime and max_age_seconds and now - scan_mtime > max_age_seconds:
@@ -584,7 +626,7 @@ def reconcile_positions(scan_positions: List[Dict[str, Any]],
     # Closed/zero-liquidity rows are not open positions (bug #4/#8): they
     # must not be added as tracked entries and do not keep a pool 'present'.
     scan_open = [p for p in scan_positions if row_is_open(p)]
-    if not scan_open:
+    if not scan_open and history_complete:
         report["skipped"] = "no open positions in scan"
         return report
 
@@ -592,21 +634,93 @@ def reconcile_positions(scan_positions: List[Dict[str, Any]],
     state = load_state(path)
     open_positions: List[Dict[str, Any]] = list(state.get("open_positions") or [])
 
-    # Pool-level count matching (legacy-safe): tracked entries without a
-    # position id can only match by pool, so a pool is fully accounted for
-    # when the scan shows no more open rows than we already track. Surplus
-    # rows are added WITH their scan position id so future closes match.
-    tracked_by_pool: Dict[Tuple[str, str], int] = {}
-    for p in open_positions:
-        key = _scan_key(p)
-        tracked_by_pool[key] = tracked_by_pool.get(key, 0) + 1
+    # Identity index of the live book from the scan.
+    scan_by_id: Dict[str, Dict[str, Any]] = {}
     scan_by_pool: Dict[Tuple[str, str], int] = {}
     for p in scan_open:
+        pid = row_position_id(p)
+        if pid:
+            scan_by_id[pid] = p
         key = _scan_key(p)
         scan_by_pool[key] = scan_by_pool.get(key, 0) + 1
+    tracked_ids_any = {str(p.get("position_id") or "") for p in open_positions}
+    tracked_ids_any.discard("")
+
+    changed = False
+    kept: List[Dict[str, Any]] = []
+    for entry in open_positions:
+        pid = str(entry.get("position_id") or "")
+        if pid and pid in scan_by_id:
+            # Tracked and live: refresh value in place.
+            usd = row_position_usd(scan_by_id[pid])
+            if usd != float(entry.get("position_usd") or 0.0):
+                report["updated"].append({
+                    "pool_address": entry.get("pool_address"),
+                    "position_id": pid,
+                    "position_usd": entry.get("position_usd"),
+                    "new_position_usd": usd,
+                })
+                entry["position_usd"] = usd
+                changed = True
+            kept.append(entry)
+            continue
+        key = _scan_key(entry)
+        replacement = None
+        if pid and history_complete:
+            # Tracked id absent from a complete scan. If the same pool has
+            # a live row with a DIFFERENT id, this is a rebalance
+            # replacement: adopt the live identity in place (the position
+            # was closed and re-opened on the same pool).
+            for spid, row in scan_by_id.items():
+                if _scan_key(row) == key and spid not in tracked_ids_any:
+                    replacement = (spid, row)
+                    break
+        if replacement is not None:
+            new_id, row = replacement
+            report["updated"].append({
+                "pool_address": entry.get("pool_address"),
+                "position_id": pid,
+                "new_position_id": new_id,
+                "position_usd": entry.get("position_usd"),
+                "new_position_usd": row_position_usd(row),
+                "reason": "rebalance replacement (same pool, new position id)",
+            })
+            entry["position_id"] = new_id
+            entry["position_usd"] = row_position_usd(row)
+            changed = True
+            kept.append(entry)
+            continue
+        if pid and history_complete:
+            # Dead entry with no replacement (closed elsewhere).
+            report["removed"].append({
+                "pool_address": entry.get("pool_address"),
+                "position_id": pid,
+                "position_usd": entry.get("position_usd"),
+                "reason": "position absent from complete scan",
+            })
+            changed = True
+            continue
+        # id-less legacy entry: pool-count fallback. The pool is fully
+        # accounted for when the scan shows no more open rows than we
+        # already track for it.
+        if scan_by_pool.get(key, 0) >= sum(
+                1 for e in open_positions if _scan_key(e) == key):
+            kept.append(entry)
+            continue
+        kept.append(entry)
+
+    open_positions = kept
+
+    # Surplus scan rows: live positions the book does not track. With
+    # identity matching this is ONLY genuinely-new positions (or pools
+    # whose tracked entries were just removed as dead). Add them WITH
+    # their scan position id so future closes match.
     tracked_ids = {str(p.get("position_id") or "") for p in open_positions}
     tracked_ids.discard("")
-
+    tracked_by_pool: Dict[Tuple[str, str], int] = {}
+    for p in open_positions:
+        k = _scan_key(p)
+        tracked_by_pool[k] = tracked_by_pool.get(k, 0) + 1
     for pos in scan_open:
         pid = row_position_id(pos)
         if pid and pid in tracked_ids:
@@ -625,6 +739,7 @@ def reconcile_positions(scan_positions: List[Dict[str, Any]],
         open_positions.append(entry)
         tracked_by_pool[key] = tracked_by_pool.get(key, 0) + 1
         report["added"].append(entry)
+        changed = True
 
     scan_pools = {_scan_key(p) for p in scan_open}
     for p in open_positions:
@@ -635,7 +750,7 @@ def reconcile_positions(scan_positions: List[Dict[str, Any]],
                 "position_usd": p.get("position_usd"),
             })
 
-    if report["added"] and not dry_run:
+    if changed and not dry_run:
         state["open_positions"] = open_positions
         save_state(state, path)
     return report

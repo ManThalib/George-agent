@@ -285,15 +285,19 @@ def _safe_record_execution_state(signal: Dict[str, Any],
 
 
 def _reconcile_exposure() -> None:
-    """Add on-chain positions missing from the tracked exposure state.
+    """Reconcile tracked exposure entries against the live position scan.
 
-    Runs once per run_once. Additive and conservative (see
-    exposure_guard.reconcile_positions); a stale scan is skipped. Never
-    raises: reconciliation is a safety net, not a gate.
+    Runs once per run_once. Evidence-based (see
+    exposure_guard.reconcile_positions): fresh + history-complete scans
+    add genuinely-new positions, refresh values, drop dead entries, and
+    update rebalance replacements in place. A stale scan is skipped.
+    Never raises: reconciliation is a safety net, not a gate.
     """
     try:
         positions, mtime = exposure_guard.load_scan_positions()
-        report = exposure_guard.reconcile_positions(positions, scan_mtime=mtime)
+        complete = exposure_guard.scan_history_complete()
+        report = exposure_guard.reconcile_positions(
+            positions, scan_mtime=mtime, history_complete=complete)
         if report.get("skipped"):
             print(f"[{utc_now()}] exposure reconcile skipped: {report['skipped']}")
             return
@@ -301,6 +305,14 @@ def _reconcile_exposure() -> None:
             print(f"[{utc_now()}] exposure reconcile added "
                   f"{entry.get('pool_address')} (wallet {entry.get('wallet_id')}, "
                   f"${entry.get('position_usd')})")
+        for entry in report.get("updated") or []:
+            print(f"[{utc_now()}] exposure reconcile value update "
+                  f"{entry.get('pool_address')} "
+                  f"${entry.get('position_usd')} -> ${entry.get('new_position_usd')}")
+        for entry in report.get("removed") or []:
+            print(f"[{utc_now()}] exposure reconcile removed dead entry "
+                  f"{entry.get('pool_address')} pos={entry.get('position_id')} "
+                  f"(${entry.get('position_usd')}): {entry.get('reason')}")
         for entry in report.get("unmatched") or []:
             print(f"[{utc_now()}] exposure reconcile: tracked position "
                   f"{entry.get('pool_address')} absent from scan (kept; needs a "
@@ -931,35 +943,87 @@ def _build_dust_swap_request(signal: Dict[str, Any], cfg: Dict[str, Any], rails:
     }
 
 
+def _swap_error_class(err_text: str) -> str:
+    """Classify a swap chain error for the bounded retry policy.
+
+    On-chain custom program errors (SPL/DEX 'Custom': NNNN, e.g. Whirlpool
+    6024 InvalidTokenMintOrder) are DETERMINISTIC: the built route/tx is
+    wrong; retrying it burns fees. Transient classes (blockhash, timeout,
+    RPC/network) may legitimately succeed on a second attempt. slippage is
+    its own class: a fresh quote at a worse price will not fix it either.
+    """
+    text = str(err_text or "")
+    if "Custom" in text and any(c.isdigit() for c in text):
+        return "deterministic"
+    for token in ("blockhash", "BlockhashNotFound", "timeout", "timed out",
+                  "ECONNRESET", "ETIMEDOUT", "fetch failed", "429",
+                  "503", "502", "Connection error"):
+        if token in text:
+            return "transient"
+    if "slippage" in text.lower() or "SlippageTolerance" in text:
+        return "slippage"
+    return "unknown"
+
+
 def _handle_swap_to_usdc(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    """Auto-execute a dust swap to USDC when the executor is in auto mode."""
-    try:
-        req = _build_dust_swap_request(signal, cfg, rails)
-    except (KeyError, TypeError, ValueError) as exc:
-        return "rejected", {"stage": "dust_swap_build", "error": str(exc)}
+    """Auto-execute a dust swap to USDC when the executor is in auto mode.
 
-    try:
-        sim = chain_simulate(req)
-    except ChainError as exc:
-        return "failed", {"stage": "simulate", "error": str(exc)}
-    except Exception as exc:
-        return "failed", {"stage": "simulate", "error": str(exc), "traceback": traceback.format_exc()}
+    Bounded retry policy (2026-10-17, SPL Custom 6024 window): at most ONE
+    additional attempt, only for transient-class errors, >=60s backoff, and
+    never the same serialized transaction (each attempt re-quotes fresh).
+    Deterministic (on-chain program) and slippage errors fail immediately —
+    re-sending the same route cannot succeed. The signal is left un-moved
+    on failure so the normal queue rails (age caps, dust re-queue) own the
+    next attempt on a future cycle.
+    """
+    max_attempts = 2
+    attempts = []
+    for attempt in range(max_attempts):
+        if attempt:
+            time.sleep(60)
+        try:
+            req = _build_dust_swap_request(signal, cfg, rails)
+        except (KeyError, TypeError, ValueError) as exc:
+            return "rejected", {"stage": "dust_swap_build", "error": str(exc)}
 
-    if not _sim_ok(sim):
-        return "rejected", {"stage": "simulate", "error": "simulation failed", "simulation": sim.get("simulation")}
+        try:
+            sim = chain_simulate(req)
+        except ChainError as exc:
+            attempts.append({"stage": "simulate", "error": str(exc)[:300]})
+            klass = _swap_error_class(str(exc))
+            if klass != "transient" or attempt == max_attempts - 1:
+                return "failed", {"stage": "simulate", "error": str(exc),
+                                   "error_class": klass, "attempts": attempts}
+            continue
+        except Exception as exc:
+            return "failed", {"stage": "simulate", "error": str(exc),
+                               "traceback": traceback.format_exc()}
 
-    try:
-        result = chain_send(req)
-    except ChainError as exc:
-        return "failed", {"stage": "send", "error": str(exc)}
-    except Exception as exc:
-        return "failed", {"stage": "send", "error": str(exc), "traceback": traceback.format_exc()}
+        if not _sim_ok(sim):
+            return "rejected", {"stage": "simulate", "error": "simulation failed",
+                                "simulation": sim.get("simulation")}
 
-    details: Dict[str, Any] = {"result": result}
-    for key in ("confirmed_via", "fallback_broadcast", "confirmations"):
-        if isinstance(result, dict) and result.get(key) is not None:
-            details[key] = result[key]
-    return "executed", details
+        try:
+            result = chain_send(req)
+        except ChainError as exc:
+            attempts.append({"stage": "send", "error": str(exc)[:300]})
+            klass = _swap_error_class(str(exc))
+            if klass != "transient" or attempt == max_attempts - 1:
+                return "failed", {"stage": "send", "error": str(exc),
+                                   "error_class": klass, "attempts": attempts}
+            continue
+        except Exception as exc:
+            return "failed", {"stage": "send", "error": str(exc),
+                               "traceback": traceback.format_exc()}
+
+        details: Dict[str, Any] = {"result": result}
+        if attempt:
+            details["retry_attempt"] = attempt + 1
+        for key in ("confirmed_via", "fallback_broadcast", "confirmations"):
+            if isinstance(result, dict) and result.get(key) is not None:
+                details[key] = result[key]
+        return "executed", details
+    return "failed", {"stage": "exhausted", "attempts": attempts}
 
 
 def process_signal(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
@@ -1256,6 +1320,35 @@ def _capital_epilogue(cfg: Dict[str, Any], executed: List[Dict[str, Any]]) -> bo
     return False
 
 
+def _prune_failed_verify(max_age_days: float = 30.0) -> int:
+    """Cap the failed_verify pile: delete files older than max_age_days.
+
+    Live 2026-10-17: 33 files (mostly verifier false alarms, since fixed)
+    accumulated with no retention. Every file there was journaled and
+    owner-notified at move time; pruning old copies does not lose the
+    audit trail (journal + ledger keep it). Returns the count removed.
+    """
+    try:
+        if not FAILED_VERIFY_DIR.exists():
+            return 0
+        cutoff = time.time() - max_age_days * 86400.0
+        removed = 0
+        for f in FAILED_VERIFY_DIR.glob("*.json"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+                    removed += 1
+            except OSError:
+                continue
+        if removed:
+            print(f"[{utc_now()}] failed_verify pruned {removed} file(s) "
+                  f"older than {max_age_days:.0f}d")
+        return removed
+    except Exception as exc:
+        print(f"[{utc_now()}] failed_verify prune failed: {exc}")
+        return 0
+
+
 def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Process all pending signals once under the dispatcher lock. Returns
     the signals that were executed on-chain (the caller decides on any
@@ -1267,8 +1360,10 @@ def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> List[Dict[str, Any]]
             return executed
 
         # Keep exposure state aligned with the authoritative on-chain scan
-        # before evaluating any new signal (additive; stale scan is skipped).
+        # before evaluating any new signal (evidence-based; stale scan is
+        # skipped).
         _reconcile_exposure()
+        _prune_failed_verify()
 
         pending = _iter_pending_by_priority()
         if not pending:

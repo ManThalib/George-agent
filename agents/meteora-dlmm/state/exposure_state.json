@@ -1,5 +1,46 @@
 {
-  "open_positions": [],
+  "open_positions": [
+    {
+      "pool_address": "3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv",
+      "position_id": "6nLJfXSqnEArcmXDT3vwP2SPr2EwvPQrqcxstXgaQhRE",
+      "wallet_id": "main",
+      "position_usd": 25.62029052673234,
+      "opened_at": 1792133351,
+      "source": "reconcile"
+    },
+    {
+      "pool_address": "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6",
+      "position_id": "89VQC8qBfxrjZKW6FAC7FFCCJzbujJXmqJwqrmvrwuPY",
+      "wallet_id": "main",
+      "position_usd": 37.47695671853417,
+      "opened_at": 1792169490,
+      "source": "reconcile"
+    },
+    {
+      "pool_address": "7ubS3GccjhQY99AYNKXjNJqnXjaokEdfdV915xnCb96r",
+      "position_id": "AW5P7hwwawRFbNg7GhVR9rkWPafT81mLH7es1A3GrXbW",
+      "wallet_id": "main",
+      "position_usd": 100.10454273505107,
+      "opened_at": 1792180335,
+      "source": "reconcile"
+    },
+    {
+      "pool_address": "3potGhhaNyzvCNq1CGh2wLbZLLMjpdPtG1Hpj8q2DDVR",
+      "position_id": "8GpEz4B3Kd4B2zDqB5mRHXM86cfxNoxqUUL35mtoWhW2",
+      "wallet_id": "main",
+      "position_usd": 65.22797771681999,
+      "opened_at": 1792183795,
+      "source": "reconcile"
+    },
+    {
+      "pool_address": "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE",
+      "position_id": "2YXHk8X1G7zGC79GR8jZ17QDkR8GkZceFj4LPcEBcoAP",
+      "wallet_id": "main",
+      "position_usd": 64.3785715446582,
+      "opened_at": 1792183776,
+      "source": "reconcile"
+    }
+  ],
   "daily_loss_usd": 0.0,
   "max_daily_loss_usd": 0.0,
   "peak_portfolio_usd": 0.0,
