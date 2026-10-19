@@ -10,7 +10,7 @@
 > Values here are documentation; the JSON is what the executor actually uses.
 > Rail load priority in `common/rails_loader.py`: `execution_limits.json` →
 > Sheldon policy (`pool_eligibility`, `position_sizing`, `windows`: pool-liquidity /
-> volume floors, `allowed_bin_steps`, sizing, open/close windows) → this file →
+> volume floors, `bin_step_rule`, sizing, open/close windows) → this file →
 > built-in conservative defaults.
 
 ---
@@ -82,7 +82,7 @@ is required for `close`, `claim_fees`, `claim_rewards`, `add_liquidity`, and
 | `max_meteora_range_width` | **70** | Meteora `initializePositionAndAddLiquidityByStrategy` can only create ~70 bins in one transaction; this rail overrides `max_bin_range_width` for Meteora. |
 | `max_orca_range_width` | **2000** | Orca Whirlpool range-width cap. |
 | `max_raydium_range_width` | **2000** | Raydium CLMM range-width cap. |
-| `allowed_bin_steps` | **[4, 10, 20, 25, 50, 100]** | Meteora pool `bin_step` whitelist. Read from the pool's live on-chain account (never from signal metadata); fail-closed when the fetch fails. (Strategy source: Sheldon policy `pool_eligibility.allowed_bin_steps`; bin_step<10 rejected per owner decision #34a, 2026-10-10.) |
+| `bin_step_rule` | **[4..400]** | Meteora pool `bin_step` rule: any step >= 4 is allowed, 1/2/3 are rejected, and > 400 is protocol-invalid. Read from the pool's live on-chain account (never from signal metadata); fail-closed when the fetch fails or the value is missing/0/malformed. (Owner ruling 2026-10-19, superseding decision #34a's `<10` note. Source of truth: `execution_limits.json` `range_limits.bin_step_rule`.) |
 | `reject_active_bin_out_of_range_open` | **true** | Don't open if price already outside the requested range. |
 
 **CLOSE actions bypass this section** — closing is de-risking and is always allowed (subject to mode + kill switch).
@@ -217,6 +217,12 @@ Create a file named **`KILL`** in the `agents/meteora-dlmm/` folder (or ask Jarv
 - Already in-flight transaction: wait for result, report, stop.
 - Does **not** auto-close positions (deliberate: closing under stress can be worse).
 - Removing the file resumes normal operation.
+- **How a halt reports itself (2026-10-19):** the dispatcher and
+  `run_pipeline.sh` print a line starting `KILLED:` and exit with status
+  **75**. That is distinct from `1` (cycle failure) so monitoring can tell
+  "stopped on purpose" from "broke", and the systemd `OnFailure` alert unit
+  treats 75 as an expected stop — it logs and does not page. The driver also
+  checks for this file **before** screening, so a halted cycle costs nothing.
 
 ---
 

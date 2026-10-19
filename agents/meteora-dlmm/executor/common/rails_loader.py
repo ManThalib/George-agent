@@ -41,7 +41,7 @@ DEFAULT_RAILS: Dict[str, Any] = {
     "min_24h_volume_usd": 1000000.0,
     "min_open_score": 70.0,
     "min_open_score_adaptive_floor": 55.0,
-    "allowed_bin_steps": [10, 20, 25, 50, 100],
+    "bin_step_rule": {"min": 4, "max": 400},
     "max_bin_range_width": 2000,
     "max_meteora_range_width": 70,
     "max_orca_range_width": 2000,
@@ -108,7 +108,10 @@ def _load_sheldon_policy() -> Dict[str, Any]:
     policy["min_open_score"] = scoring.get("min_open_score",
                                            pool.get("min_open_score"))
     policy["scoring_source"] = scoring.get("source")
-    policy["allowed_bin_steps"] = pool.get("allowed_bin_steps")
+    # bin_step is NOT overridden from Sheldon's policy: execution_limits.json
+    # is the single source of truth for George's rails (owner decision
+    # 2026-10-19). Sheldon's copy previously overrode this file here, which
+    # is how the two drifted apart.
 
     sizing = data.get("position_sizing") or {}
     policy["min_position_usd"] = sizing.get("min_position_usd")
@@ -130,6 +133,16 @@ def _parse_int_list(raw: str) -> list:
     return [int(part) for part in cleaned.split(",") if part]
 
 
+def _parse_bin_step_rule(raw: str) -> dict:
+    """Parse a rail value like '[4..400]' or '4-400' into a rule dict."""
+    cleaned = raw.strip().strip("[]").replace(" ", "")
+    for sep in ("..", "-"):
+        if sep in cleaned:
+            lo, hi = cleaned.split(sep, 1)
+            return {"min": int(lo), "max": int(hi)}
+    raise ValueError("expected <min>..<max>")
+
+
 _RAIL_PARSERS = {
     "max_position_usd": float,
     "min_position_usd": float,
@@ -143,7 +156,7 @@ _RAIL_PARSERS = {
     "max_price_impact_pct": float,
     "priority_fee_cap_sol": float,
     "tx_timeout_seconds": int,
-    "allowed_bin_steps": _parse_int_list,
+    "bin_step_rule": _parse_bin_step_rule,
     "max_bin_range_width": int,
     "max_meteora_range_width": int,
     "max_orca_range_width": int,

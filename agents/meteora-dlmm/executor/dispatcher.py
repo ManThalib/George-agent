@@ -60,23 +60,75 @@ from common import mirror
 import common.approvals as approvals_store
 import common.dust_queue as dust_queue
 import common.exposure_guard as exposure_guard
+from common.redact import redact_url
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "ledger"))
 import ledger as trade_ledger  # noqa: E402  (executor-local ledger module)
 
 
-SIGNALS_DIR = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/signals")
+def _resolve_signals_dir() -> Path:
+    """Signals root, overridable via GEORGE_SIGNALS_DIR.
+
+    The pipeline driver exports the same directory it hands to Sheldon, so
+    producer and consumer cannot drift onto different paths. Accepts either the
+    signals root or a `.../pending` path and normalizes to the root.
+    """
+    raw = os.environ.get("GEORGE_SIGNALS_DIR", "").strip()
+    if not raw:
+        return Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/signals")
+    path = Path(raw)
+    return path.parent if path.name == "pending" else path
+
+
+SIGNALS_DIR = _resolve_signals_dir()
 FAILED_VERIFY_DIR = SIGNALS_DIR / "failed_verify"
 KILL_FILE = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/KILL")
+
+# Exit status for an owner-initiated KILL halt. Distinct from 1 (cycle
+# failure) so monitoring can tell "stopped on purpose" from "broke".
+EXIT_KILLED = 75
 
 # --- Capital refresh chain (swap -> wallet rescan -> Sheldon re-entry) ---
 # After a successful prep swap the wallet changed; Missy's wallet screener
 # re-reads balances and Sheldon re-evaluates (emitting the open when funded).
-WALLET_REFRESH_SCRIPT = "/data/missy-agent/wallet_screener/run_wallet.sh"
+# Repo root for the sibling agents. Overridable so the same executor works in
+# the /data layout and in the dev workspace checkout.
+_AGENTS_ROOT = os.environ.get(
+    "AGENTS_ROOT", "/root/.openclaw-devdash/workspace/agents"
+)
+WALLET_REFRESH_SCRIPT = os.environ.get(
+    "WALLET_REFRESH_SCRIPT",
+    f"{_AGENTS_ROOT}/missy-agent/wallet_screener/run_wallet.sh",
+)
 WALLET_SCAN_DIR = "/data/missy-data/wallet_screens"
-POSITION_REFRESH_SCRIPT = "/data/missy-agent/position_screener/run_positions.sh"
+POSITION_REFRESH_SCRIPT = os.environ.get(
+    "POSITION_REFRESH_SCRIPT",
+    f"{_AGENTS_ROOT}/missy-agent/position_screener/run_positions.sh",
+)
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-SHELDON_CYCLE_CMD = ["python3", "/data/.openclaw/workspace-agents/sheldon/scoring/run_cycle.py", "--write-signals"]
+SHELDON_CYCLE_CMD = [
+    "python3",
+    os.environ.get("SHELDON_CYCLE_SCRIPT", f"{_AGENTS_ROOT}/Sheldon-agent/run_cycle.py"),
+    "--write-signals",
+    # Re-entry must read and write the same state the driver used. Before
+    # 2026-10-19 it ran with Sheldon's own defaults, so close-settlement
+    # state lived in a second file: the driver saw 32/32 settled while the
+    # capital-refresh re-entry saw 2 stale CLOSE_EMITTED entries and blocked
+    # every open. Live paths are the driver's (GEORGE_STATE_DIR etc.), with
+    # the same defaults run_pipeline.sh exports when the env is absent.
+    "--pools-dir", os.environ.get("MISSY_POOL_SCAN_DIR", "/data/missy-data/pool_screens"),
+    "--positions-dir", os.environ.get("MISSY_POSITION_SCAN_DIR", "/data/missy-data/position_scans"),
+    "--wallet-scans-dir", WALLET_SCAN_DIR,
+    "--state-dir", os.environ.get(
+        "GEORGE_STATE_DIR",
+        "/data/.openclaw/workspace-agents-george/agents/meteora-dlmm/state"),
+    "--memory-dir", os.environ.get(
+        "GEORGE_MEMORY_DIR",
+        "/data/.openclaw/workspace-agents-george/agents/meteora-dlmm/memory"),
+    "--signals-dir", os.environ.get(
+        "GEORGE_SIGNALS_DIR",
+        "/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/signals/pending"),
+]
 REENTRY_STATE_PATH = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/state/capital_reentry.json")
 LOCK_PATH = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/state/dispatcher.lock")
 MAX_CAPITAL_REENTRIES_PER_HOUR = 8
@@ -399,6 +451,32 @@ def _read_usdc_scan() -> Tuple[Optional[int], Optional[str], float]:
     return 0, path, mtime
 
 
+def _is_usdc_scan_zero_but_has_assets(scan_path: str) -> bool:
+    """Return True if the USDC amount in the scan is zero but there are any
+    other assets with non-zero value."""
+    try:
+        with open(scan_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return False
+    usdc_amount = 0
+    has_other_assets = False
+    for a in data.get("assets", []):
+        if a.get("mint") == USDC_MINT:
+            try:
+                usdc_amount = int(a.get("amount_raw") or 0)
+            except (TypeError, ValueError):
+                usdc_amount = 0
+        else:
+            try:
+                amount = int(a.get("amount_raw") or 0)
+                if amount > 0:
+                    has_other_assets = True
+            except (TypeError, ValueError):
+                pass
+    return usdc_amount == 0 and has_other_assets
+
+
 def _read_latest_usdc_raw() -> Optional[int]:
     """USDC raw balance from the newest wallet scan (verification only)."""
     return _read_usdc_scan()[0]
@@ -429,6 +507,9 @@ def _run_wallet_refresh(cfg: Dict[str, Any], expected_usdc_delta: int = 0,
             return f"FAILED exit={proc.returncode}: {tail[0][:160]}"
         last_out = (proc.stdout or "").strip().splitlines()[-1:]
         cur, cur_path, cur_mtime = _read_usdc_scan()
+        if _is_usdc_scan_zero_but_has_assets(cur_path):
+            # USDC amount is zero but there are other assets; treat as invalid scan and retry.
+            continue
         if cur is None or pre is None:
             return f"ok -> {last_out[0] if last_out else ''}"
         # A refresh that did not produce a new scan cannot verify anything:
@@ -533,20 +614,33 @@ def _run_position_refresh(
     return "FAILED (unreachable)", []
 
 
-def _run_sheldon_reentry() -> Tuple[str, str]:
+def _run_sheldon_reentry() -> Tuple[str, str, str]:
+    """Run Sheldon's cycle and return (status, stdout, stderr).
+
+    A leftover prep that has already aged out will be rejected by validation
+    no matter what, so it must not consume a per-wake prep slot: doing so let
+    a stale backlog starve the fresh prep that was actually actionable (the
+    deferred file sorts first by name, so the fresh prep lost the slot on
+    every subsequent wake).
+
+    Unusable or unreadable signals report fresh and are left to the normal
+    validation path, so the cap is never silently bypassed.
+    """
     try:
         proc = subprocess.run(
             SHELDON_CYCLE_CMD, capture_output=True, text=True, timeout=300,
         )
     except subprocess.TimeoutExpired:
-        return "FAILED (timeout after 300s)", ""
+        return "FAILED (timeout after 300s)", "", ""
     except Exception as exc:
-        return f"FAILED ({exc})", ""
-    tail = (proc.stdout or "").strip().splitlines()[-1:] or ["no output"]
+        return f"FAILED ({exc})", "", ""
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+    tail = stdout.strip().splitlines()[-1:] or ["no output"]
     if proc.returncode != 0:
-        err_tail = (proc.stderr or "").strip().splitlines()[-1:] or [""]
-        return f"FAILED exit={proc.returncode}: {err_tail[0][:160]}", proc.stdout or ""
-    return f"ok: {tail[0][:160]}", proc.stdout or ""
+        err_tail = stderr.strip().splitlines()[-1:] or [""]
+        return f"FAILED exit={proc.returncode}: {err_tail[0][:160]}", stdout, stderr
+    return f"ok: {tail[0][:160]}", stdout, stderr
 
 
 def _run_dispatcher_followup(depth: int) -> str:
@@ -607,11 +701,11 @@ def _trigger_capital_refresh(cfg: Dict[str, Any], signal_id: str = "",
     print(f"[{utc_now()}] wallet rescan: {wallet_result}")
 
     print(f"[{utc_now()}] capital refresh: Sheldon re-entry...")
-    sheldon_result, sheldon_stdout = _run_sheldon_reentry()
+    sheldon_result, sheldon_stdout, sheldon_stderr = _run_sheldon_reentry()
     print(f"[{utc_now()}] Sheldon re-entry: {sheldon_result}")
 
     followup_result = "skipped (no new signals)"
-    if "WAKE_GEORGE:" in sheldon_stdout:
+    if "WAKE_GEORGE:" in sheldon_stdout or "WAKE_GEORGE:" in sheldon_stderr:
         print(f"[{utc_now()}] capital refresh: dispatcher follow-up...")
         followup_result = _run_dispatcher_followup(depth)
         print(f"[{utc_now()}] dispatcher follow-up: {followup_result}")
@@ -1245,9 +1339,9 @@ def _trigger_close_refresh(cfg: Dict[str, Any], closes: List[Dict[str, Any]]) ->
     followup_result = "skipped"
     if not blocked:
         print(f"[{utc_now()}] close refresh: Sheldon re-entry...")
-        sheldon_result, sheldon_stdout = _run_sheldon_reentry()
+        sheldon_result, sheldon_stdout, sheldon_stderr = _run_sheldon_reentry()
         print(f"[{utc_now()}] Sheldon re-entry: {sheldon_result}")
-        if "WAKE_GEORGE:" in sheldon_stdout:
+        if "WAKE_GEORGE:" in sheldon_stdout or "WAKE_GEORGE:" in sheldon_stderr:
             print(f"[{utc_now()}] close refresh: dispatcher follow-up...")
             followup_result = _run_dispatcher_followup(depth)
             print(f"[{utc_now()}] dispatcher follow-up: {followup_result}")
@@ -1483,7 +1577,7 @@ def do_approve(signal_id: str, cfg: Dict[str, Any], rails: Dict[str, Any]) -> No
 
     if KILL_FILE.exists():
         print(f"[{utc_now()}] KILL file present; cannot approve {signal_id}.")
-        sys.exit(1)
+        sys.exit(EXIT_KILLED)
 
     action = signal.get("action")
     try:
@@ -1689,7 +1783,9 @@ def do_check(cfg: Dict[str, Any]) -> None:
     print("Executor health check")
     print(f"  mode: {cfg.get('mode')}")
     print(f"  wallet: {cfg.get('wallet_public_key')}")
-    print(f"  rpc: {cfg.get('rpc_https_url', '')[:60]}...")
+    # Never print the endpoint raw: it usually carries the API key in its
+    # query string, and truncation preserves a recoverable prefix of it.
+    print(f"  rpc: {redact_url(cfg.get('rpc_https_url', ''))}")
     missing = []
     if not os.environ.get("SOLANA_PUBLIC_WALLET") and not cfg.get("wallet_public_key"):
         missing.append("SOLANA_PUBLIC_WALLET")
@@ -1736,6 +1832,14 @@ def main() -> None:
 
     if args.once:
         incomplete = _capital_epilogue(cfg, run_once(cfg, rails))
+        if KILL_FILE.exists():
+            # A killed cycle must be distinguishable from a healthy one.
+            # Previously this exited 0 and printed "cycle complete", so any
+            # monitor (systemd OnFailure, alerting, a human reading the tail)
+            # saw a normal run. Distinct status, distinct marker line.
+            print(f"[{utc_now()}] KILLED: halted by KILL file; no signals "
+                  f"processed (exit {EXIT_KILLED}).")
+            sys.exit(EXIT_KILLED)
         if incomplete:
             # Owner decision 2026-10-10 (#20): an incomplete close-refresh is
             # a failed cycle for automation/monitoring purposes.

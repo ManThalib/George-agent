@@ -4,10 +4,15 @@ import os
 from pathlib import Path
 from typing import Any, Dict
 
+from common.config_gate import live_config_path
 from common.utils import load_json
 
 
-CONFIG_PATH = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/config/agent.config.json")
+# The executor's config path is defined once, in common/config_gate.py, so the
+# pipeline's start gate and this loader cannot drift apart again. Before
+# 2026-10-18 they pointed at different files and disagreed (dry_run vs auto)
+# while the pipeline log still claimed "(dry_run)".
+CONFIG_PATH = live_config_path()
 RAILS_PATH = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/SAFETY_RAILS.md")
 
 

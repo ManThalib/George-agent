@@ -3,22 +3,21 @@
 from typing import Any, Dict, List
 
 from common import signal_validator
+from common.bin_step_rail import (
+    DEFAULT_BIN_STEP_RULE,
+    meteora_bin_step_allowed,
+    normalize_rule,
+)
 from common.signal_validator import SignalValidationError, validate_core
 
 
-def _allowed_bin_steps(rails: Dict[str, Any]) -> List[int]:
-    """Return the allowed_bin_steps rail as a sorted int list.
+def _bin_step_rule(rails: Dict[str, Any]) -> Dict[str, int]:
+    """Return the bin_step rule rail, defaulting to the owner rule.
 
-    Falls back to the SAFETY_RAILS.md default when the rail is missing or
-    malformed — a broken rail must never widen the whitelist.
+    A missing or malformed rail falls back to the default rule — never to a
+    widened one.
     """
-    raw = rails.get("allowed_bin_steps")
-    if not isinstance(raw, (list, tuple)) or not raw:
-        raw = [10, 20, 25, 50, 100]
-    try:
-        return sorted({int(step) for step in raw})
-    except (TypeError, ValueError):
-        return [10, 20, 25, 50, 100]
+    return normalize_rule(rails.get("bin_step_rule", DEFAULT_BIN_STEP_RULE))
 
 
 def validate(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Dict[str, Any]:
@@ -51,13 +50,12 @@ def validate(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any])
         raise SignalValidationError(
             f"cannot verify pool bin_step for {signal.get('pool_address')} "
             "(on-chain fetch failed); refusing to open with the "
-            "allowed_bin_steps rail unverified"
+            "bin_step_rule rail unverified"
         )
-    allowed = _allowed_bin_steps(rails)
-    if bin_step not in allowed:
+    _ok, _why = meteora_bin_step_allowed(bin_step, _bin_step_rule(rails))
+    if not _ok:
         raise SignalValidationError(
-            f"pool bin_step {bin_step} not in allowed_bin_steps {allowed} "
-            f"(minimum {min(allowed)}); refusing to open"
+            f"pool {_why}; refusing to open"
         )
 
     return signal

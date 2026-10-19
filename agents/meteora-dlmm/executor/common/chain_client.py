@@ -6,6 +6,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict
 
+from common.redact import redact_urls_in
+
 
 CHAIN_DIR = Path(__file__).parent.parent / "chain"
 DISPATCH_JS = CHAIN_DIR / "dispatch.js"
@@ -36,17 +38,27 @@ def _run(req: Dict[str, Any]) -> Dict[str, Any]:
             err = json.loads(proc.stdout)
         except Exception:
             err = proc.stdout
-        raise ChainError(f"chain dispatcher failed ({proc.returncode}): {err}")
+        # The dispatcher's error text can embed a full RPC URL (dispatch.js
+        # echoes offending fallback URLs, key included). Redact at this
+        # boundary so every JS throw path is covered at once, without
+        # changing what dispatch.js does.
+        raise ChainError(
+            redact_urls_in(f"chain dispatcher failed ({proc.returncode}): {err}")
+        )
 
     try:
         response = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
-        raise ChainError(f"chain dispatcher returned invalid JSON: {exc}\nstdout: {proc.stdout[:500]}") from exc
+        raise ChainError(redact_urls_in(
+            f"chain dispatcher returned invalid JSON: {exc}\nstdout: {proc.stdout[:500]}"
+        )) from exc
 
     if not response.get("ok"):
         stage = response.get("stage", "unknown")
         error = response.get("error", "unknown error")
-        raise ChainError(f"chain dispatcher returned error at stage {stage}: {error}")
+        raise ChainError(redact_urls_in(
+            f"chain dispatcher returned error at stage {stage}: {error}"
+        ))
 
     return response
 
