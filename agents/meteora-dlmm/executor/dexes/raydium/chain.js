@@ -78,7 +78,8 @@ async function computePending(connection, poolId, ownerPosition) {
   const poolAccount = await connection.getAccountInfo(poolId);
   if (!poolAccount) throw new Error(`raydium pool not found: ${poolId.toBase58()}`);
   const pool = PoolInfoLayout.decode(poolAccount.data);
-  // SDK layout field names are tickLower/tickUpper (not tickLowerIndex).
+  // PersonalPositionLayout exposes tickLowerIndex/tickUpperIndex; the bare
+  // tickLower/tickUpper names appear on some older SDK builds. Accept either.
   const tickLowerIndex = ownerPosition.tickLowerIndex ?? ownerPosition.tickLower;
   const tickUpperIndex = ownerPosition.tickUpperIndex ?? ownerPosition.tickUpper;
   const startLower = TickArrayUtil.getTickArrayStartIndex(tickLowerIndex, pool.tickSpacing);
@@ -312,11 +313,28 @@ export async function closePosition(req, connection, wallet) {
   if (positionLiquidity.gt(new BN(0))) {
     const bps = req.max_slippage_bps ?? 100;
     const slippage = bps / 10000;
-    const sqrtPriceCurrent = TickUtil.getSqrtPriceAtTick(Number(poolInfo.tickCurrent));
+    // SDK layout names are tickLowerIndex/tickUpperIndex (see computePending);
+    // the bare tickLower/tickUpper names do not exist on the decoded account,
+    // so reading them produced undefined and the min-out amounts below were
+    // built from NaN. Keep the ?? fallback for older SDK builds only.
+    const posTickLower = ownerPosition.tickLowerIndex ?? ownerPosition.tickLower;
+    const posTickUpper = ownerPosition.tickUpperIndex ?? ownerPosition.tickUpper;
+    if (!Number.isFinite(Number(posTickLower)) || !Number.isFinite(Number(posTickUpper))) {
+      throw new Error(
+        `raydium close: position ${positionId} has no readable tick bounds ` +
+        `(tickLowerIndex=${posTickLower}, tickUpperIndex=${posTickUpper}); ` +
+        `refusing to compute min-out amounts from an unreadable range`
+      );
+    }
+    // Same reason as openPosition: the program prices at the pool's live
+    // sqrtPriceX64, which sits between ticks. Deriving the current price from
+    // tickCurrent moves the min-out amounts away from what the program
+    // recomputes and trips PriceSlippageCheck (6017).
+    const sqrtPriceCurrent = liveSqrtPrice(poolInfo);
     const { amountSlippageA, amountSlippageB } = LiquidityMathUtil.getAmountsFromLiquidityWithSlippage(
       sqrtPriceCurrent,
-      TickUtil.getSqrtPriceAtTick(ownerPosition.tickLower),
-      TickUtil.getSqrtPriceAtTick(ownerPosition.tickUpper),
+      TickUtil.getSqrtPriceAtTick(Number(posTickLower)),
+      TickUtil.getSqrtPriceAtTick(Number(posTickUpper)),
       positionLiquidity,
       false,
       false,
