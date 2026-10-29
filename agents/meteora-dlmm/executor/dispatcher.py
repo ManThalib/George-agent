@@ -39,6 +39,7 @@ from common.journal import append as journal_append
 from common.rails_loader import RAILS_PATH, load_rails
 from common.signal_validator import (
     SignalValidationError,
+    clear_pool_caches as clear_validator_caches,
     signal_age_seconds,
     validate_core,
 )
@@ -1110,13 +1111,26 @@ def _handle_swap_to_usdc(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dic
     return "failed", {"stage": "exhausted", "attempts": attempts}
 
 
+def _clear_per_signal_caches() -> None:
+    """Drop every cache a later signal in this wake must not inherit.
+
+    A mid-wake swap changes real balances and pool state, so each signal gets
+    a clean boundary. This used to clear only the preflight caches; the
+    validator's pool-tick cache was never cleared at all, which in daemon mode
+    (``while True`` in main) meant an open could be validated against a tick
+    read hours earlier.
+    """
+    live_preflight.clear_preflight_caches()
+    clear_validator_caches()
+
+
 def process_signal(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     action = signal.get("action")
 
     # Per-signal cache boundary: a mid-wake swap changes real balances, so
     # every signal must see fresh live state in its preflight (not whatever
     # an earlier leg of this wake cached).
-    live_preflight.clear_preflight_caches()
+    _clear_per_signal_caches()
 
     if action == "swap_to_usdc":
         if cfg.get("mode") == "auto":

@@ -15,7 +15,13 @@ _pool_tick_cache: Dict[tuple, Optional[int]] = {}
 
 
 def _cached_pool_tick(dex: str, pool_address: str, rpc_url: str) -> Optional[int]:
-    """Return current tick from cache, or None (populate cache miss)."""
+    """Return current tick from cache, or None (populate cache miss).
+
+    The cache is per-signal, not per-process: the dispatcher clears it through
+    ``clear_pool_caches()`` before each signal (same boundary as the preflight
+    caches). Without that, a long-running dispatcher would keep validating
+    opens against a tick read hours earlier.
+    """
     key = (dex, pool_address, rpc_url)
     if key in _pool_tick_cache:
         return _pool_tick_cache[key]
@@ -25,6 +31,11 @@ def _cached_pool_tick(dex: str, pool_address: str, rpc_url: str) -> Optional[int
     result = fetch_pool_current_tick(dex, pool_address, rpc_url)
     _pool_tick_cache[key] = result
     return result
+
+
+def clear_pool_caches() -> None:
+    """Drop the in-wake pool-tick cache (called once per processed signal)."""
+    _pool_tick_cache.clear()
 
 
 SUPPORTED_DEXES = {"meteora", "raydium", "orca"}

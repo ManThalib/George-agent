@@ -9,6 +9,7 @@ import sys
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -42,11 +43,51 @@ def _open_signal(lower, upper, dex="orca", score=72.0):
     }
 
 
+class TickCacheBoundaryTests(unittest.TestCase):
+    """The tick cache must not survive a signal boundary.
+
+    In daemon mode (``while True`` in dispatcher.main) an age-less tick cache
+    meant later opens were validated against a tick read on the first wake,
+    which is exactly the stale-range bug the guard exists to prevent.
+    """
+
+    def setUp(self):
+        signal_validator.clear_pool_caches()
+
+    def tearDown(self):
+        signal_validator.clear_pool_caches()
+
+    @patch("common.signal_validator.fetch_pool_current_tick", return_value=100)
+    def test_tick_is_cached_within_a_signal(self, fetch):
+        first = signal_validator._cached_pool_tick("meteora", "POOL", "https://rpc.test")
+        second = signal_validator._cached_pool_tick("meteora", "POOL", "https://rpc.test")
+        self.assertEqual((first, second), (100, 100))
+        self.assertEqual(fetch.call_count, 1)
+
+    @patch("common.signal_validator.fetch_pool_current_tick", return_value=100)
+    def test_clear_pool_caches_forces_a_refetch(self, fetch):
+        signal_validator._cached_pool_tick("meteora", "POOL", "https://rpc.test")
+        signal_validator.clear_pool_caches()
+        signal_validator._cached_pool_tick("meteora", "POOL", "https://rpc.test")
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_process_signal_clears_both_cache_families(self):
+        import dispatcher
+
+        with mock.patch.object(dispatcher, "live_preflight") as preflight, \
+                mock.patch.object(dispatcher, "clear_validator_caches") as validator:
+            with self.assertRaises(SignalValidationError):
+                # An invalid action still hits the cache boundary first.
+                dispatcher.process_signal({"action": "nonsense"}, CFG, RAILS)
+        preflight.clear_preflight_caches.assert_called_once()
+        validator.assert_called_once()
+
+
 class TickContainmentGuardTests(unittest.TestCase):
     def setUp(self):
-        # The validator caches pool ticks in-wake; clear per test so mocked
+        # The validator caches pool ticks in-walk; clear per test so mocked
         # fetch values never leak across tests sharing a pool address.
-        signal_validator._pool_tick_cache.clear()
+        signal_validator.clear_pool_caches()
 
     @patch("common.signal_validator.fetch_pool_current_tick", return_value=26191)
     def test_range_containing_tick_passes(self, _mock):
