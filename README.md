@@ -127,7 +127,17 @@ per 6h (`mutation_cooldown_hours`). `open` score uses an adaptive threshold
 ## Tests
 
 ```bash
-python3 -m unittest discover -s tests
+./run_tests.sh
+```
+
+Runs the executor unit tests, the root integration tests, and the chain layer's
+JS tests. The Python suites are hermetic (no `/data`, no live config); tests
+that need the production host skip themselves with a reason.
+
+```bash
+python3 -m unittest discover -s tests                        # root only
+cd agents/meteora-dlmm/executor && python3 -m unittest discover -s common
+cd agents/meteora-dlmm/executor && npm test                  # chain layer (JS)
 ```
 
 ## Workspace Files
