@@ -20,15 +20,39 @@ RAILS_PATH = paths.rails_path()
 EXECUTION_LIMITS_PATH = paths.execution_limits_path()
 SHELDON_POLICY_PATH = paths.sheldon_policy_path()
 
+# --------------------------------------------------------------------------
+# Conservative fallback rails.
+#
+# INVARIANT (owner decision, 2026-10-29 audit): no fallback here may be LOOSER
+# than the value in execution_limits.json. A missing or unreadable limits file
+# must narrow what the executor may do, never widen it. The previous table
+# violated this in three places — max_daily_loss_usd 50 vs 10 (5x looser),
+# min_open_score 70 vs 90 (20 points looser) and max_open_positions 3 vs 9 —
+# so a single unreadable file silently disabled part of the loss rail.
+#
+# Direction matters per key:
+#   max_*  / *_cap_*  : smaller is stricter
+#   min_*  / floor    : larger  is stricter
+#   windows / bools   : see each comment
+#
+# test_rails_limits.FallbackStrictnessTests pins the invariant, so adding a
+# rail without deciding its fallback fails the suite.
+# --------------------------------------------------------------------------
 DEFAULT_RAILS: Dict[str, Any] = {
+    # per-position and portfolio caps (smaller is stricter)
     "max_position_usd": 100.0,
     "min_position_usd": 10.0,
-    "max_total_exposure_usd": 300.0,
-    "max_open_positions": 3,
-    "max_daily_loss_usd": 50.0,
+    "max_total_exposure_usd": 300.0,     # live 500: fallback stays narrower
+    "max_open_positions": 3,             # live 9: fallback stays narrower
+    "max_daily_loss_usd": 10.0,          # live 10: must never be looser
     "max_drawdown_pct": 10.0,
+    # circuit breakers
+    # NOTE: neither breaker has an enforcement point in this codebase today
+    # (no failure counter exists). Listed here because SAFETY_RAILS.md
+    # documents them; see the audit report, section 3.8.
     "pause_after_consecutive_failures": 3,
     "pause_on_rpc_error_streak": 5,
+    # execution guards
     "max_slippage_bps": 100,
     "min_remove_bps": 1,
     "partial_remove_bps_min": 2500,
@@ -38,16 +62,23 @@ DEFAULT_RAILS: Dict[str, Any] = {
     "priority_fee_cap_sol": 0.0005,
     "tx_timeout_seconds": 60,
     "one_tx_at_a_time": True,
+    "claim_min_usd": 1.0,                # live 1.0; 0 would claim dust for gas
+    # pool eligibility (larger floors are stricter)
     "min_pool_liquidity_usd": 250000.0,
     "min_24h_volume_usd": 1000000.0,
-    "min_open_score": 70.0,
+    # scoring floor (larger is stricter)
+    "min_open_score": 90.0,              # live 90: must never be looser
     "min_open_score_adaptive_floor": 55.0,
+    # range limits
     "bin_step_rule": {"min": 4, "max": 400},
     "max_bin_range_width": 2000,
     "max_meteora_range_width": 70,
     "max_orca_range_width": 2000,
     "max_raydium_range_width": 2000,
     "reject_active_bin_out_of_range_open": True,
+    # Documented in SAFETY_RAILS.md, but NOT enforced by any executor code
+    # path today (they are producer-side scheduling hints). Kept so the
+    # markdown mirror keeps parsing; do not treat them as live rails.
     "open_window_utc": "00:00-23:59",
     "close_window_utc": "00:00-23:59",
     "blackout_dates": [],
@@ -186,36 +217,35 @@ def _parse_markdown_rails(path: Path) -> Dict[str, Any]:
 
 
 def load_rails() -> Dict[str, Any]:
-    """Load rails from JSON single-sources, with markdown fallback.
+    """Load rails from the JSON single-sources, with a markdown doc fallback.
 
-    Priority:
-      1. execution_limits.json (mechanical limits)
-      2. sheldon_policy.json (strategy-owned values George enforces)
-      3. SAFETY_RAILS.md / rails.json (documentation / legacy mirror)
-      4. built-in conservative defaults
+    Priority (later wins):
+      1. conservative built-in defaults (never looser than execution_limits)
+      2. execution_limits.json (mechanical limits — the source of truth)
+      3. sheldon_policy.json (strategy-owned values George enforces)
+      4. SAFETY_RAILS.md, for keys no JSON source provides
+
+    The former step "legacy SAFETY_RAILS.json mirror" was removed: it merged
+    ``{**DEFAULT_RAILS, **mirror}`` back over the already-resolved rails, so
+    any key the mirror omitted was silently REVERTED to the built-in default
+    (i.e. adding the file could loosen max_daily_loss from 10 to 50). The file
+    does not exist in any deployment, so the branch was dead as well as
+    dangerous.
+
+    The markdown fallback only fills keys that neither the defaults nor the
+    JSON sources set, so a documentation edit can never widen a mechanical
+    limit.
     """
     rails = dict(DEFAULT_RAILS)
 
     # Mechanical execution limits are the primary source.
-    limits = _load_execution_limits()
-    rails.update(limits)
+    rails.update(_load_execution_limits())
 
     # Strategy-owned policy values that George still enforces fail-closed.
     policy = _load_sheldon_policy()
     rails.update({k: v for k, v in policy.items() if v is not None})
 
-    # Legacy JSON mirror (kept for backwards compatibility).
-    json_path = RAILS_PATH.with_suffix(".json")
-    if json_path.exists():
-        try:
-            rails.update({**DEFAULT_RAILS, **load_json(json_path)})
-        except Exception:
-            pass
-    else:
-        # No JSON mirror -> parse the markdown for any missing keys.
-        markdown_rails = _parse_markdown_rails(RAILS_PATH)
-        for key, val in markdown_rails.items():
-            if key not in rails:
-                rails[key] = val
-
+    for key, val in _parse_markdown_rails(RAILS_PATH).items():
+        if key not in rails:
+            rails[key] = val
     return rails

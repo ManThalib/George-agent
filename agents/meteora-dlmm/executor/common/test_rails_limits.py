@@ -198,5 +198,81 @@ class GuardEnforcementTests(unittest.TestCase):
         self.assertIn("open positions", reason)
 
 
+class FallbackStrictnessTests(unittest.TestCase):
+    """A missing limits file must NARROW the executor, never widen it.
+
+    Before the 2026-10-29 audit, DEFAULT_RAILS was looser than the live file in
+    three places (daily loss 50 vs 10, min_open_score 70 vs 90, exposure 300 vs
+    500 for the same key that lives at 500), so one unreadable file silently
+    disabled most of the loss rail.
+    """
+
+    # Direction per rail. "cap" = a smaller value is stricter (it forbids
+    # more); "floor" = a larger value is stricter (it demands more).
+    CAPS = (
+        "max_position_usd", "max_total_exposure_usd", "max_open_positions",
+        "max_daily_loss_usd", "max_drawdown_pct", "max_slippage_bps",
+        "partial_remove_bps_max", "max_price_impact_pct",
+        "priority_fee_cap_sol", "tx_timeout_seconds",
+        "max_bin_range_width", "max_meteora_range_width",
+        "max_orca_range_width", "max_raydium_range_width",
+        "pause_after_consecutive_failures", "pause_on_rpc_error_streak",
+    )
+    FLOORS = (
+        "min_position_usd", "min_open_score", "min_open_score_adaptive_floor",
+        "min_remove_bps", "partial_remove_bps_min", "claim_min_usd",
+        "mutation_cooldown_hours", "min_pool_liquidity_usd",
+        "min_24h_volume_usd",
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.limits = rails_loader._load_execution_limits()
+
+    def test_every_cap_fallback_is_at_least_as_strict(self):
+        for key in self.CAPS:
+            if key not in self.limits:
+                continue
+            with self.subTest(rail=key):
+                self.assertLessEqual(
+                    float(rails_loader.DEFAULT_RAILS[key]),
+                    float(self.limits[key]),
+                    f"fallback {key} is looser than execution_limits.json",
+                )
+
+    def test_every_floor_fallback_is_at_least_as_strict(self):
+        for key in self.FLOORS:
+            if key not in self.limits:
+                continue
+            with self.subTest(rail=key):
+                self.assertGreaterEqual(
+                    float(rails_loader.DEFAULT_RAILS[key]),
+                    float(self.limits[key]),
+                    f"fallback {key} is looser than execution_limits.json",
+                )
+
+    def test_bin_step_rule_fallback_is_not_wider(self):
+        live = self.limits["bin_step_rule"]
+        fallback = rails_loader.DEFAULT_RAILS["bin_step_rule"]
+        self.assertGreaterEqual(fallback["min"], live["min"])
+        self.assertLessEqual(fallback["max"], live["max"])
+
+    def test_markdown_cannot_widen_a_mechanical_limit(self):
+        """SAFETY_RAILS.md is documentation; editing it must not move a rail."""
+        with tempfile.TemporaryDirectory() as tmp:
+            md = Path(tmp) / "SAFETY_RAILS.md"
+            md.write_text(
+                "| `max_daily_loss_usd` | **1000** | pretend rail |\n"
+                "| `min_open_score` | **1** | pretend rail |\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(rails_loader, "RAILS_PATH", md):
+                rails = rails_loader.load_rails()
+        self.assertLessEqual(float(rails["max_daily_loss_usd"]),
+                             float(self.limits["max_daily_loss_usd"]))
+        self.assertGreaterEqual(float(rails["min_open_score"]),
+                                float(self.limits["min_open_score"]))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
