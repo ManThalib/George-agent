@@ -7,6 +7,8 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from common.solana import DEX_PROGRAM_IDS as _PROGRAM_IDS
+
 
 # --------------------------------------------------------------------------
 # In-wake cache for pool state (populated by dispatcher.run_once())
@@ -77,13 +79,9 @@ _RANGE_WIDTH_DEFAULTS = {"meteora": 70, "orca": 2000, "raydium": 2000}
 # Owning program of each pool account. Decoding bytes from an account that is
 # not owned by the expected DEX program can yield a plausible-looking i32/u16,
 # which would let a wrong-account read pass the tick / bin-step rails. The
-# preflight path already checks this (live_preflight._POOL_LAYOUT); the
-# validator path did not, so the guard was fail-open.
-_PROGRAM_IDS = {
-    "meteora": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
-    "orca": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
-    "raydium": "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
-}
+# table is shared with the preflight path (common/solana.py) so the two readers
+# cannot disagree about which program owns a pool.
+
 
 
 class SignalValidationError(Exception):

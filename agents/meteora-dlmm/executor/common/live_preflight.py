@@ -28,6 +28,14 @@ import json
 import urllib.request
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from common.solana import (
+    DEX_PROGRAM_IDS,
+    TOKEN_2022_PROGRAM_ID,
+    TOKEN_PROGRAM_ID,
+    USDC_MINT,
+    WSOL_MINT,
+)
+
 # --------------------------------------------------------------------------
 # In-wake cache for pool state (populated by dispatcher.run_once())
 # --------------------------------------------------------------------------
@@ -47,23 +55,18 @@ def clear_preflight_caches() -> None:
     _pool_mints_cache.clear()
 
 
-WSOL_MINT = "So11111111111111111111111111111111111111112"
-USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
-
-# Byte offsets of (mint_x, mint_y) inside each DEX's on-chain pool account,
-# plus the owning program id as a guard. All three sets were verified
-# empirically on live mainnet pool accounts 2026-10-10 by locating the known
-# mints in the raw account bytes:
+# Byte offsets of (mint_x, mint_y) inside each DEX's on-chain pool account.
+# The owning program id is a guard, not a layout detail: all three sets were
+# verified empirically on live mainnet pool accounts 2026-10-10 by locating the
+# known mints in the raw account bytes, and the owner check makes a
+# wrong-account (or wrong-layout) read fail closed.
 #   meteora LbPair     (len 904)  tokenXMint @ 88,  tokenYMint @ 120
 #   orca    Whirlpool  (len 653)  mintA      @ 101, mintB      @ 181
 #   raydium PoolState  (len 1544) tokenMint0 @ 73,  tokenMint1 @ 105
-# The owner check makes a wrong-account (or wrong-layout) read fail closed.
 _POOL_LAYOUT = {
-    "meteora": ((88, 120), "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"),
-    "orca": ((101, 181), "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"),
-    "raydium": ((73, 105), "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK"),
+    "meteora": (88, 120),
+    "orca": (101, 181),
+    "raydium": (73, 105),
 }
 
 _B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -177,10 +180,12 @@ def fetch_token_balances(rpc_url: str, wallet: str, timeout: float = 10.0,
 def fetch_pool_mints(dex: str, pool_address: str, rpc_url: str,
                      timeout: float = 10.0) -> Optional[Tuple[str, str]]:
     """Live (mint_x, mint_y) of a pool, or None when unreadable."""
-    layout = _POOL_LAYOUT.get((dex or "").lower())
-    if not layout or not pool_address or not rpc_url:
+    dex_key = (dex or "").lower()
+    offsets = _POOL_LAYOUT.get(dex_key)
+    program = DEX_PROGRAM_IDS.get(dex_key)
+    if not offsets or not pool_address or not rpc_url:
         return None
-    (off_x, off_y), program = layout
+    off_x, off_y = offsets
     result = _rpc(
         rpc_url, "getAccountInfo",
         [pool_address, {"encoding": "base64", "commitment": "confirmed"}],
@@ -189,7 +194,7 @@ def fetch_pool_mints(dex: str, pool_address: str, rpc_url: str,
     value = (result or {}).get("value") if isinstance(result, dict) else None
     if not value:
         return None
-    if program and value.get("owner") != program:
+    if not program or value.get("owner") != program:
         return None
     data = value.get("data")
     raw = data[0] if isinstance(data, list) and data else data

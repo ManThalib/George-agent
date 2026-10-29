@@ -29,7 +29,8 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "executor"))
 
-from common import paths  # noqa: E402  (executor-local module)
+from common import paths  # noqa: E402  (executor-local modules)
+from common.solana import SOL_MINT, USDC_MINT  # noqa: E402
 
 
 AGENT_ROOT = paths.agent_root()
@@ -38,8 +39,6 @@ SIGNALS_DIR = paths.signals_dir()
 APPROVALS_DIR = paths.approvals_dir()
 LEDGER_PATH = paths.ledger_path()
 
-USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-SOL_MINT = "So11111111111111111111111111111111111111112"
 
 SIGNAL_DIRS = [
     SIGNALS_DIR / "processed",

@@ -44,6 +44,7 @@ from common.signal_validator import (
     validate_core,
 )
 from common.chain_request import base_request
+from common.solana import USDC_MINT, WSOL_MINT
 from common.chain_client import ChainError, simulate as chain_simulate, send as chain_send
 from common import live_preflight
 from common import mirror
@@ -130,7 +131,6 @@ POSITION_REFRESH_SCRIPT = os.environ.get(
     "POSITION_REFRESH_SCRIPT",
     f"{_AGENTS_ROOT}/missy-agent/position_screener/run_positions.sh",
 )
-USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 SHELDON_CYCLE_CMD = [
     "python3",
     os.environ.get("SHELDON_CYCLE_SCRIPT", f"{_AGENTS_ROOT}/Sheldon-agent/run_cycle.py"),
@@ -185,7 +185,6 @@ PREP_SIGNAL_PREFIX = "sheldon-prep-"
 # SOL-side position token — the same swap either way, so the priority sorter
 # ranks it as a gas top-up (plan 03 Change G rank 3, mint-based, no reason
 # parsing). Other preps are target-token buys (rank 4).
-WSOL_MINT = "So11111111111111111111111111111111111111112"
 
 # Explicit action priority (plan 03 Change G): de-risk first, then make gas
 # available, then prepare position tokens, open only after readiness, dust
