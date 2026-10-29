@@ -96,7 +96,18 @@ def _resolve_signals_dir() -> Path:
 
 
 SIGNALS_DIR = _resolve_signals_dir()
-FAILED_VERIFY_DIR = SIGNALS_DIR / "failed_verify"
+
+
+def _failed_verify_dir() -> Path:
+    """signals/failed_verify beside the *current* signals root.
+
+    Computed on use, not frozen at import: the module constant ignored any
+    later SIGNALS_DIR override (tests, GEORGE_SIGNALS_DIR relocation) and wrote
+    the quarantined signal into a different tree than the one being processed.
+    """
+    return SIGNALS_DIR / "failed_verify"
+
+
 KILL_FILE = paths.kill_file()
 
 # Exit status for an owner-initiated KILL halt. Distinct from 1 (cycle
@@ -779,7 +790,7 @@ def _handle_self_verify(signal: Dict[str, Any], signal_path: Path,
     action = signal.get("action")
     verify = _self_verify_block(details)
     if action in {"open", "add_liquidity"} and (verify is None or not verify.get("ok")):
-        dest = _move_to_dir(signal_path, FAILED_VERIFY_DIR)
+        dest = _move_to_dir(signal_path, _failed_verify_dir())
         _notify_owner(
             f"SELF-VERIFY FAILED signal={signal.get('signal_id')} action={action} "
             f"dex={signal.get('dex')} pool={signal.get('pool_address')} "
@@ -1447,11 +1458,12 @@ def _prune_failed_verify(max_age_days: float = 30.0) -> int:
     audit trail (journal + ledger keep it). Returns the count removed.
     """
     try:
-        if not FAILED_VERIFY_DIR.exists():
+        failed_dir = _failed_verify_dir()
+        if not failed_dir.exists():
             return 0
         cutoff = time.time() - max_age_days * 86400.0
         removed = 0
-        for f in FAILED_VERIFY_DIR.glob("*.json"):
+        for f in failed_dir.glob("*.json"):
             try:
                 if f.stat().st_mtime < cutoff:
                     f.unlink()
@@ -1506,18 +1518,19 @@ def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> List[Dict[str, Any]]
                     preps_done += 1
             status, details = process_signal_path(signal_path, cfg, rails)
             print(f"  {signal_path.name} -> {status}: {details.get('error') or details.get('notes', '')}")
-            if status in {"rejected", "failed", "awaiting_approval", "dry_run", "executed", "queued_for_review", "skipped"}:
-                if status == "executed":
-                    try:
-                        executed_signal = load_json(signal_path)
-                    except Exception:
-                        executed_signal = {"signal_id": signal_path.stem}
-                    landed = _handle_self_verify(executed_signal, signal_path, details)
-                    readback = landed
-                else:
-                    _move_to_processed(signal_path)
-                    readback = _processed_path(signal_path)
+            # Every status leaves pending/: an executed signal goes through the
+            # self-verify router (processed/ or failed_verify/), everything else
+            # is processed/ so it is not retried next wake. This used to be
+            # wrapped in a set-membership test that listed every known status
+            # and then bound `readback` only inside it: a new status would have
+            # raised UnboundLocalError mid-loop, leaving the rest of the batch
+            # unprocessed.
             if status == "executed":
+                try:
+                    executed_signal = load_json(signal_path)
+                except Exception:
+                    executed_signal = {"signal_id": signal_path.stem}
+                readback = _handle_self_verify(executed_signal, signal_path, details)
                 try:
                     processed_signal = load_json(readback)
                 except Exception:
@@ -1539,15 +1552,13 @@ def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> List[Dict[str, Any]]
                           f"landed")
                 else:
                     _safe_record_execution_state(processed_signal, details)
+            else:
+                _move_to_processed(signal_path)
         if deferred_preps:
             print(f"[{utc_now()}] prep cap {max_preps}/wake: deferred "
                   f"{len(deferred_preps)} prep signal(s) to the next wake: "
                   f"{', '.join(deferred_preps)}")
     return executed
-
-
-def _processed_path(signal_path: Path) -> Path:
-    return SIGNALS_DIR / "processed" / signal_path.name
 
 
 def process_signal_path(signal_path: Path, cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:

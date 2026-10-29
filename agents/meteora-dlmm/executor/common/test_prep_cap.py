@@ -222,5 +222,70 @@ class SwapFreshnessGateTests(unittest.TestCase):
             self.assertIsNone(signal_validator.signal_age_seconds(payload))
 
 
+class RunOnceStatusRoutingTests(unittest.TestCase):
+    """Every status must leave pending/ — including one nobody has added yet.
+
+    run_once used to gate the move on a set literal listing every known status
+    and bind `readback` inside it, so a new status raised UnboundLocalError
+    mid-batch and left the rest of the queue unprocessed.
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.signals = self.root / "signals"
+        self.pending = self.signals / "pending"
+        self.pending.mkdir(parents=True)
+        self._orig = {
+            "SIGNALS_DIR": dispatcher.SIGNALS_DIR,
+            "KILL_FILE": dispatcher.KILL_FILE,
+            "LOCK_PATH": dispatcher.LOCK_PATH,
+        }
+        dispatcher.SIGNALS_DIR = self.signals
+        dispatcher.KILL_FILE = self.root / "KILL"
+        dispatcher.LOCK_PATH = self.root / "dispatcher.lock"
+
+    def tearDown(self):
+        for k, v in self._orig.items():
+            setattr(dispatcher, k, v)
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _write(self, name):
+        (self.pending / name).write_text(json.dumps({
+            "signal_id": name[:-5],
+            "action": "close",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }))
+
+    def test_unrecognised_status_is_still_archived(self):
+        self._write("sheldon-close-1.json")
+        with mock.patch.object(dispatcher, "process_signal_path",
+                               return_value=("a_status_from_the_future", {})), \
+                mock.patch.object(dispatcher, "_reconcile_exposure", lambda: None):
+            executed = dispatcher.run_once({}, {})
+        self.assertEqual(executed, [])
+        self.assertEqual(list(self.pending.glob("*.json")), [])
+        archived = self.signals / "processed" / "sheldon-close-1.json"
+        self.assertTrue(archived.exists())
+
+    def test_executed_status_goes_through_the_self_verify_router(self):
+        self._write("sheldon-open-1.json")
+        (self.pending / "sheldon-open-1.json").write_text(json.dumps({
+            "signal_id": "sheldon-open-1",
+            "action": "open",
+            "position_id": "POS1",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }))
+        details = {"result": {"verify": {"ok": False}, "position_id": "POS1"}}
+        with mock.patch.object(dispatcher, "process_signal_path",
+                               return_value=("executed", details)), \
+                mock.patch.object(dispatcher, "_reconcile_exposure", lambda: None), \
+                mock.patch.object(dispatcher, "_safe_record_execution_state",
+                                  lambda *a, **k: None):
+            dispatcher.run_once({}, {})
+        # Failed self-verify must route the file to failed_verify/, not processed/.
+        failed = self.signals / "failed_verify" / "sheldon-open-1.json"
+        self.assertTrue(failed.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
