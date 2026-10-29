@@ -258,9 +258,11 @@ class CloseRefreshTests(unittest.TestCase):
     def test_depth_cap_blocks_close_refresh(self):
         self._seed_scan()
         with mock.patch.dict(os.environ, {"GEORGE_CAPITAL_DEPTH": "3"}):
-            dispatcher._trigger_close_refresh(CFG, [self._close()])
+            incomplete = dispatcher._trigger_close_refresh(CFG, [self._close()])
         self.assertEqual(self.script_calls, [])
         self.assertTrue(any("CLOSE CHAIN DEPTH LIMIT" in n for n in self.notifications))
+        # A bounded deferral is not a failed refresh: the cycle stays healthy.
+        self.assertIs(incomplete, False)
 
     def test_env_skip_flag(self):
         self._seed_scan()

@@ -1287,11 +1287,14 @@ def _trigger_close_refresh(cfg: Dict[str, Any], closes: List[Dict[str, Any]]) ->
         return True
     depth = int(os.environ.get("GEORGE_CAPITAL_DEPTH") or 0)
     if depth >= MAX_CAPITAL_CHAIN_DEPTH:
+        # A bounded deferral, by design: the remaining legs are left to the
+        # next cycle. Not an "incomplete refresh" (that means a close whose
+        # absence could not be verified), so the cycle still exits healthy.
         _notify_owner(
             f"CLOSE CHAIN DEPTH LIMIT signal={ids}: depth {depth} >= "
             f"{MAX_CAPITAL_CHAIN_DEPTH}; remaining legs left to the next cycle"
         )
-        return
+        return False
 
     now = time.time()
     state = _load_reentry_state()
