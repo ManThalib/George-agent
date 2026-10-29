@@ -67,6 +67,12 @@ _BIN_STEP_DECODE_OFFSETS = {
     "meteora": 80,
 }
 
+# Narrowest range width allowed per DEX when no rail key is configured. These
+# are the owner's values from execution_limits.json, so a missing key can only
+# narrow (never widen) the rail.
+_RANGE_WIDTH_DEFAULT = 2000
+_RANGE_WIDTH_DEFAULTS = {"meteora": 70, "orca": 2000, "raydium": 2000}
+
 
 # Owning program of each pool account. Decoding bytes from an account that is
 # not owned by the expected DEX program can yield a plausible-looking i32/u16,
@@ -332,6 +338,25 @@ def validate_core(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, 
             raise SignalValidationError(f"bin_range values must be integers: {exc}") from exc
         if lower > upper:
             raise SignalValidationError(f"bin_range.lower ({lower}) > upper ({upper})")
+
+        # Range-width rail, per DEX. This check used to be implemented three
+        # times (once per dex validator, plus a second time for Meteora
+        # mutations), which is how the per-DEX values drifted apart.
+        #
+        # Every cap that applies is enforced and the tightest wins, so a
+        # missing per-DEX key can never widen the rail: Meteora's floor is 70
+        # bins, the CLMMs' is 2000, and a global max_bin_range_width only ever
+        # narrows that further.
+        max_width = min(
+            _RANGE_WIDTH_DEFAULTS.get(dex, _RANGE_WIDTH_DEFAULT),
+            int(rails.get("max_bin_range_width", _RANGE_WIDTH_DEFAULT)),
+            int(rails.get(f"max_{dex}_range_width",
+                          _RANGE_WIDTH_DEFAULTS.get(dex, _RANGE_WIDTH_DEFAULT))),
+        )
+        width = upper - lower + 1
+        if width > max_width:
+            raise SignalValidationError(
+                f"{dex} range width {width} (inclusive) exceeds rail {max_width}")
 
         # Live-price guard: a range that does not contain the pool's current
         # tick/bin would deposit one-sided at a stale price (the ZEC/USDC

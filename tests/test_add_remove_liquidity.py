@@ -109,11 +109,17 @@ class TestAddRemoveValidator(unittest.TestCase):
                 validate_core(_valid_add(), CFG, RAILS)
 
     def test_add_width_exceeds_meteora_rail(self):
+        """Range width is enforced by the shared validator now.
+
+        The per-DEX width check used to live in meteora_validator (once for
+        open, once for mutations); it is one check in validate_core today, so
+        the rejection happens one layer earlier.
+        """
         bad = _valid_add(bin_range={"lower": -3000, "upper": -2000})
         with patch.object(signal_validator, "fetch_pool_current_tick", return_value=-2127):
-            signal = validate_core(bad, CFG, RAILS)
-            with self.assertRaises(SignalValidationError):
-                meteora_validator.validate(signal, CFG, RAILS)
+            with self.assertRaises(SignalValidationError) as ctx:
+                validate_core(bad, CFG, RAILS)
+        self.assertIn("exceeds rail", str(ctx.exception))
 
     def test_remove_valid(self):
         out = validate_core(_valid_remove(), CFG, RAILS)

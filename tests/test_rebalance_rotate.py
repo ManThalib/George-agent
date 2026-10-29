@@ -126,11 +126,13 @@ class TestRebalanceRotateValidator(unittest.TestCase):
             validate_core(bad, CFG, RAILS)
 
     def test_rebalance_range_width_rail_applies(self):
+        """Range width is enforced by the shared validator now (see
+        test_add_remove_liquidity); the per-DEX duplicate is gone."""
         bad = _valid_rebalance(bin_range={"lower": -3000, "upper": -2000})
         with patch.object(signal_validator, "fetch_pool_current_tick", return_value=-2127):
-            signal = validate_core(bad, CFG, RAILS)
-            with self.assertRaises(SignalValidationError):
-                meteora_validator.validate(signal, CFG, RAILS)
+            with self.assertRaises(SignalValidationError) as ctx:
+                validate_core(bad, CFG, RAILS)
+        self.assertIn("exceeds rail", str(ctx.exception))
 
     def test_rebalance_side_x_with_y_amount_rejected(self):
         bad = _valid_rebalance(side="x", liquidity={"amount_x": "0", "amount_y": "1000"})

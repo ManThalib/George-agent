@@ -1,4 +1,10 @@
-"""Meteora DLMM signal validator."""
+"""Meteora DLMM signal validator.
+
+Common rules (required fields, tick containment, range width, remove bps,
+sizing, score floor) live in common.signal_validator; this module adds the one
+Meteora-specific rail that cannot be expressed generically: the on-chain
+bin_step must be inside the owner's bin_step_rule.
+"""
 
 from typing import Any, Dict
 
@@ -23,22 +29,11 @@ def _bin_step_rule(rails: Dict[str, Any]) -> Dict[str, int]:
 def validate(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Dict[str, Any]:
     signal = validate_core(signal, cfg, rails)
 
-    if signal.get("action") in {"add_liquidity", "remove_liquidity", "rebalance", "rotate"}:
-        return validate_mutation(signal, cfg, rails)
-
     if signal.get("action") != "open":
         return signal
 
-    bin_range = signal.get("bin_range") or {}
-    lower = int(bin_range.get("lower", 0))
-    upper = int(bin_range.get("upper", 0))
-    width = upper - lower + 1
-    max_width = int(rails.get("max_meteora_range_width", 70))
-    if width > max_width:
-        raise SignalValidationError(f"meteora range width {width} (inclusive) exceeds rail {max_width}")
-
-    # Bin-step rail (SAFETY_RAILS.md `allowed_bin_steps`). The step is read
-    # from the pool's live on-chain account (u16 @ 80), never from
+    # Bin-step rail (SAFETY_RAILS.md `bin_step_rule`). The step is read from
+    # the pool's live on-chain account (u16 @ 80), never from
     # producer-supplied signal metadata: the executor must not trust the
     # producer to police itself. Fail-closed on fetch failure — the open
     # needs RPC to execute anyway, and a rail that disappears when the
@@ -52,34 +47,8 @@ def validate(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any])
             "(on-chain fetch failed); refusing to open with the "
             "bin_step_rule rail unverified"
         )
-    _ok, _why = meteora_bin_step_allowed(bin_step, _bin_step_rule(rails))
-    if not _ok:
-        raise SignalValidationError(
-            f"pool {_why}; refusing to open"
-        )
-
-    return signal
-
-
-def validate_mutation(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Dict[str, Any]:
-    """Per-DEX checks for add_liquidity / remove_liquidity on Meteora.
-
-    Runs after common validate_core (which enforces required fields, the
-    remove bps rail, and the add live-tick guard).
-    """
-    action = signal.get("action")
-    if action not in {"add_liquidity", "remove_liquidity", "rebalance", "rotate"}:
-        return signal
-
-    if action in {"add_liquidity", "rebalance", "rotate"}:
-        bin_range = signal.get("bin_range") or {}
-        lower = int(bin_range.get("lower", 0))
-        upper = int(bin_range.get("upper", 0))
-        width = upper - lower + 1
-        max_width = int(rails.get("max_meteora_range_width", 70))
-        if width > max_width:
-            raise SignalValidationError(
-                f"meteora add range width {width} (inclusive) exceeds rail {max_width}"
-            )
+    ok, why = meteora_bin_step_allowed(bin_step, _bin_step_rule(rails))
+    if not ok:
+        raise SignalValidationError(f"pool {why}; refusing to open")
 
     return signal
