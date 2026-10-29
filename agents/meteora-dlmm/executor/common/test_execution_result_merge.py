@@ -137,5 +137,51 @@ class RecordedStateTests(unittest.TestCase):
                 {"signal_id": "s1", "action": "open"}, _details())
 
 
+class RecordDecisionTests(unittest.TestCase):
+    """_record_decision: one journal write, ledger only when capital moved.
+
+    It replaced six copies of the same block. The subtle case is an executed
+    open whose self-verify failed: it journals as executed_unverified (so
+    downstream consumers do not read it as 'capital deployed and verified') but
+    must still produce a ledger row, because the transaction did land.
+    """
+
+    def _run(self, decision, ledger=None):
+        journaled, ledgered = [], []
+        with mock.patch.object(dispatcher, "journal_append",
+                               side_effect=lambda **kw: journaled.append(kw)), \
+                mock.patch.object(dispatcher.trade_ledger, "append_row",
+                                  side_effect=lambda row: ledgered.append(row)):
+            dispatcher._record_decision(
+                {"signal_id": "s1", "action": "open"}, decision, {"ok": True},
+                ledger=ledger)
+        return journaled, ledgered
+
+    def test_executed_writes_both(self):
+        journaled, ledgered = self._run("executed")
+        self.assertEqual(len(journaled), 1)
+        self.assertEqual(len(ledgered), 1)
+
+    def test_rejected_writes_journal_only(self):
+        journaled, ledgered = self._run("rejected")
+        self.assertEqual(len(journaled), 1)
+        self.assertEqual(ledgered, [])
+
+    def test_executed_unverified_journals_that_decision_but_still_ledgers(self):
+        journaled, ledgered = self._run("executed_unverified", ledger=True)
+        self.assertEqual(journaled[0]["decision"], "executed_unverified")
+        self.assertEqual(len(ledgered), 1)
+
+    def test_ledger_failure_never_raises(self):
+        with mock.patch.object(dispatcher, "journal_append"), \
+                mock.patch.object(dispatcher.trade_ledger, "append_row",
+                                  side_effect=OSError("disk full")):
+            dispatcher._record_decision({"signal_id": "s1"}, "executed", {})
+
+    def test_journal_carries_the_rails_hash(self):
+        journaled, _ = self._run("rejected")
+        self.assertIsInstance(journaled[0]["rails_hash"], str)
+
+
 if __name__ == "__main__":
     unittest.main()

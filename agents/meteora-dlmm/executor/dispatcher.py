@@ -1382,18 +1382,18 @@ def _trigger_close_refresh(cfg: Dict[str, Any], closes: List[Dict[str, Any]]) ->
 
     for close, target, ab in zip(closes, targets, absence or [{} for _ in closes]):
         try:
-            journal_append(
+            _record_decision(
                 {"signal_id": close.get("signal_id"), "action": close.get("action"),
-                 "wallet_id": target.get("wallet_id"), "pool_address": target.get("pool_address")},
+                 "wallet_id": target.get("wallet_id"),
+                 "pool_address": target.get("pool_address")},
                 "close_refresh",
                 {"position_scan": position_result,
                  "absence": {"asserted": bool(target.get("strict")),
                              "absent": ab.get("absent"), "note": ab.get("note")},
-                  "wallet_scan": wallet_result,
-                  "sheldon": sheldon_result,
-                  "followup": followup_result,
-                  "depth": depth},
-                rails_hash_cached(str(RAILS_PATH)),
+                 "wallet_scan": wallet_result,
+                 "sheldon": sheldon_result,
+                 "followup": followup_result,
+                 "depth": depth},
             )
         except Exception as exc:
             print(f"[{utc_now()}] close refresh journal failed: {exc}")
@@ -1560,6 +1560,36 @@ def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> List[Dict[str, Any]]
     return executed
 
 
+def _record_decision(signal: Dict[str, Any], decision: str,
+                     details: Dict[str, Any],
+                     ledger: Optional[bool] = None) -> None:
+    """Journal one decision, and append a ledger row when capital moved.
+
+    Every decision path used to repeat this block (journal + conditional ledger
+    append + its try/except), six copies in all. ``ledger`` defaults to
+    "decision == executed"; pass it explicitly where the journaled decision and
+    the ledger trigger differ (an open whose self-verify failed journals as
+    executed_unverified but is still a real on-chain execution).
+    """
+    journal_append(
+        signal=signal,
+        decision=decision,
+        details=details,
+        rails_hash=rails_hash_cached(str(RAILS_PATH)),
+    )
+    if ledger is None:
+        ledger = decision == "executed"
+    if not ledger:
+        return
+    try:
+        trade_ledger.append_row(
+            trade_ledger.build_row(signal, decision, details, _now_utc_iso())
+        )
+    except Exception as exc:
+        # A ledger failure must never mask the execution result.
+        print(f"[{utc_now()}] ledger row append failed: {exc}")
+
+
 def process_signal_path(signal_path: Path, cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     try:
         signal = load_json(signal_path)
@@ -1585,20 +1615,8 @@ def process_signal_path(signal_path: Path, cfg: Dict[str, Any], rails: Dict[str,
         if verify is None or not verify.get("ok"):
             journal_status = "executed_unverified"
 
-    journal_append(
-        signal=signal,
-        decision=journal_status,
-        details=details,
-        rails_hash=rails_hash_cached(str(RAILS_PATH)),
-    )
-    if status == "executed":
-        try:
-            trade_ledger.append_row(
-                trade_ledger.build_row(signal, status, details, _now_utc_iso())
-            )
-        except Exception as exc:
-            # A ledger failure must never mask the execution result.
-            print(f"[{utc_now()}] ledger row append failed: {exc}")
+    _record_decision(signal, journal_status, details,
+                     ledger=(status == "executed"))
     return status, details
 
 
@@ -1628,30 +1646,13 @@ def do_approve(signal_id: str, cfg: Dict[str, Any], rails: Dict[str, Any]) -> No
     # passed validation when queued may no longer be funded when approved.
     reject = _open_preflight(signal, cfg, rails)
     if reject is not None:
-        journal_append(
-            signal=signal,
-            decision="rejected",
-            details=reject,
-            rails_hash=rails_hash_cached(str(RAILS_PATH)),
-        )
+        _record_decision(signal, "rejected", reject)
         approvals_store.move_to(signal_id, approvals_store.REJECTED_DIR)
         print(f"Approval rejected: live preflight failed: {json.dumps(reject, default=str)}")
         return
 
     decision, details = _do_send(signal, cfg, rails)
-    journal_append(
-        signal=signal,
-        decision=decision,
-        details=details,
-        rails_hash=rails_hash_cached(str(RAILS_PATH)),
-    )
-    if decision == "executed":
-        try:
-            trade_ledger.append_row(
-                trade_ledger.build_row(signal, decision, details, _now_utc_iso())
-            )
-        except Exception as exc:
-            print(f"[{utc_now()}] ledger row append failed: {exc}")
+    _record_decision(signal, decision, details)
     if decision == "executed" and action == "swap":
         try:
             amt = int(signal.get("amount") or 0)
@@ -1693,12 +1694,8 @@ def do_reject(signal_id: str, cfg: Dict[str, Any], rails: Dict[str, Any]) -> Non
         print(f"No pending approval for {signal_id}")
         sys.exit(1)
     approvals_store.move_to(signal_id, approvals_store.REJECTED_DIR)
-    journal_append(
-        signal=record["signal"],
-        decision="rejected_by_owner",
-        details={"reason": "owner rejected approval"},
-        rails_hash=rails_hash_cached(str(RAILS_PATH)),
-    )
+    _record_decision(record["signal"], "rejected_by_owner",
+                     {"reason": "owner rejected approval"})
     print(f"{signal_id} -> rejected by owner")
 
 
@@ -1779,19 +1776,8 @@ def do_sweep_dust_swaps(cfg: Dict[str, Any], rails: Dict[str, Any]) -> None:
         print(f"Sweeping {signal_id} (mint={mint})...")
         status, details = _handle_swap_to_usdc(signal, cfg, rails)
         print(f"  {status}: {details}")
-        journal_append(
-            signal=signal,
-            decision=status,
-            details=details,
-            rails_hash=rails_hash_cached(str(RAILS_PATH)),
-        )
+        _record_decision(signal, status, details)
         if status == "executed":
-            try:
-                trade_ledger.append_row(
-                    trade_ledger.build_row(signal, status, details, _now_utc_iso())
-                )
-            except Exception as exc:
-                print(f"[{utc_now()}] ledger row append failed: {exc}")
             dust_queue.update_status(signal_id, "executed")
             executed_ids.append(signal_id)
         else:
