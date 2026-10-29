@@ -89,6 +89,56 @@ class SingleConfigTests(GateTestBase):
         self.assertIn("agent.mode", reason)
 
 
+class ConfirmEachModeTests(GateTestBase):
+    """confirm_each is a real mode; the gate must not call it unknown.
+
+    It was missing from KNOWN_MODES while being documented in
+    agent.config.json and implemented by dispatcher._handle_confirm_each, so a
+    legitimate confirm_each config was refused with "not one of [...]".
+    """
+
+    def test_confirm_each_is_a_known_mode(self):
+        self.assertIn("confirm_each", config_gate.KNOWN_MODES)
+
+    def test_confirm_each_with_signer_is_allowed(self):
+        write_config(self.live, "confirm_each")
+        write_config(self.ws, "confirm_each")
+        allowed, reason = self.gate(signer=True)
+        self.assertTrue(allowed, reason)
+        self.assertIn("confirm_each", reason)
+
+    def test_confirm_each_without_signer_refuses(self):
+        """Approval ends in a signature, so no signer means every approval fails."""
+        write_config(self.live, "confirm_each")
+        allowed, reason = self.gate(signer=False)
+        self.assertFalse(allowed)
+        self.assertIn("no signer", reason)
+
+    def test_confirm_each_is_refused_by_the_pipeline_runner(self):
+        write_config(self.live, "confirm_each")
+        write_config(self.ws, "confirm_each")
+        allowed, reason = self.gate(signer=True, require_dry_run=True)
+        self.assertFalse(allowed)
+        self.assertIn("requires dry_run", reason)
+
+    def test_every_documented_mode_is_known(self):
+        """agent.config.json documents the modes; the gate must accept them."""
+        documented = set(document_config_modes())
+        self.assertTrue(documented)
+        for mode in documented:
+            with self.subTest(mode=mode):
+                self.assertIn(mode, config_gate.KNOWN_MODES)
+
+
+def document_config_modes() -> list:
+    """Mode names documented in the shipped agent.config.json."""
+    path = paths.agent_root() / "config" / "agent.config.json"
+    if not path.exists():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return list(((data.get("agent") or {}).get("mode_options") or {}).keys())
+
+
 class DriftTests(GateTestBase):
     """The exact 2026-10-18 failure: gate file and executor file disagree."""
 

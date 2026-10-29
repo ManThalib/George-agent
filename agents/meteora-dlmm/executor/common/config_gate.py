@@ -67,7 +67,11 @@ from common import paths  # noqa: E402  (after the script-mode path fix)
 LIVE_CONFIG_PATH = paths.config_path()
 WORKSPACE_CONFIG_PATH = paths.workspace_config_path()
 
-KNOWN_MODES = ("dry_run", "auto")
+# Modes the dispatcher actually implements (see dispatcher.process_signal).
+# "confirm_each" was missing here while being documented in agent.config.json
+# and implemented in dispatcher._handle_confirm_each, so a legitimate
+# confirm_each config was refused as an unknown mode.
+KNOWN_MODES = ("dry_run", "confirm_each", "auto")
 
 # Overrides exist for tests and for relocating the live tree; the defaults
 # are the production paths and must stay pointed at the executor's file.
