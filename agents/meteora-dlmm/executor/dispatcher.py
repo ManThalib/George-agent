@@ -43,6 +43,7 @@ from common.signal_validator import (
     signal_age_seconds,
     validate_core,
 )
+from common.chain_request import base_request
 from common.chain_client import ChainError, simulate as chain_simulate, send as chain_send
 from common import live_preflight
 from common import mirror
@@ -825,22 +826,15 @@ def _get_dex_module(dex: str):
 
 
 def _build_swap_request(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "dex": "jupiter",
-        "action": "swap",
-        "mode": "send",
-        "rpc_url": cfg["rpc_https_url"],
-        "fallback_rpc_urls": cfg.get("rpc_fallback_urls", []),
-        "fallback_delay_seconds": cfg.get("rpc_fallback_delay_seconds", 15),
-        "wallet_public_key": cfg["wallet_public_key"],
-        "max_slippage_bps": min(int(signal.get("max_slippage_bps", rails.get("max_slippage_bps", 100))), int(rails.get("max_slippage_bps", 100))),
-        "priority_fee_cap_sol": rails.get("priority_fee_cap_sol", 0.0005),
+    req = base_request("jupiter", signal, cfg, rails, action="swap")
+    req.update({
         "input_mint": signal["input_mint"],
         "output_mint": signal["output_mint"],
         "amount": signal["amount"],
         "exact_out": signal.get("exact_out", False),
         "max_price_impact_pct": rails.get("max_price_impact_pct", 1.5),
-    }
+    })
+    return req
 
 
 def _run_simulation(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
@@ -1035,25 +1029,15 @@ def _sim_ok(sim: Any) -> bool:
 
 def _build_dust_swap_request(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Dict[str, Any]:
     """Build a Jupiter swap request from a swap_to_usdc dust signal."""
-    return {
-        "dex": "jupiter",
-        "action": "swap",
-        "mode": "send",
-        "rpc_url": cfg["rpc_https_url"],
-        "fallback_rpc_urls": cfg.get("rpc_fallback_urls", []),
-        "fallback_delay_seconds": cfg.get("rpc_fallback_delay_seconds", 15),
-        "wallet_public_key": cfg["wallet_public_key"],
-        "max_slippage_bps": min(
-            int(signal.get("max_slippage_bps", rails.get("max_slippage_bps", 100))),
-            int(rails.get("max_slippage_bps", 100)),
-        ),
-        "priority_fee_cap_sol": rails.get("priority_fee_cap_sol", 0.0005),
+    req = base_request("jupiter", signal, cfg, rails, action="swap")
+    req.update({
         "input_mint": signal["mint"],
         "output_mint": USDC_MINT,
         "amount": int(signal["amount_raw"]),
         "exact_out": signal.get("exact_out", False),
         "max_price_impact_pct": rails.get("max_price_impact_pct", 1.5),
-    }
+    })
+    return req
 
 
 def _swap_error_class(err_text: str) -> str:
