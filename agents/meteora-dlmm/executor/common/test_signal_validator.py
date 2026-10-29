@@ -7,7 +7,7 @@ bin_range misses the pool's live current tick.
 
 import sys
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -47,7 +47,6 @@ class TickContainmentGuardTests(unittest.TestCase):
         # The validator caches pool ticks in-wake; clear per test so mocked
         # fetch values never leak across tests sharing a pool address.
         signal_validator._pool_tick_cache.clear()
-        signal_validator._pool_mints_cache.clear()
 
     @patch("common.signal_validator.fetch_pool_current_tick", return_value=26191)
     def test_range_containing_tick_passes(self, _mock):

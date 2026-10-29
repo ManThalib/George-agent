@@ -27,7 +27,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import common.chain_client as chain_client  # noqa: E402
 from common.chain_client import ChainError, _run  # noqa: E402
-from common.redact import MASK  # noqa: E402
 
 # Non-secret placeholder shaped like a provider key.
 KEY = "0123456789abcdef0123456789abcdef"

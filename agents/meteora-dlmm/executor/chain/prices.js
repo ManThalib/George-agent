@@ -47,6 +47,3 @@ export async function fetchUsdPrices(mints) {
   }
   return out;
 }
-
-// SOL mint constant for gas-cost pricing.
-export const SOL_MINT = "So11111111111111111111111111111111111111112";

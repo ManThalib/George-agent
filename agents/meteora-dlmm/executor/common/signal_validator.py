@@ -5,29 +5,13 @@ import json
 import sys
 import urllib.request
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from common.utils import load_json
 
 # --------------------------------------------------------------------------
-# In-wake caches for pool state (populated by dispatcher.run_once())
+# In-wake cache for pool state (populated by dispatcher.run_once())
 # --------------------------------------------------------------------------
-_pool_mints_cache: Dict[tuple, Optional[tuple]] = {}
 _pool_tick_cache: Dict[tuple, Optional[int]] = {}
-
-
-def _cached_pool_mints(dex: str, pool_address: str, rpc_url: str,
-                       timeout: float = 10.0) -> Optional[tuple]:
-    """Return (mint_x, mint_y) from cache, or None (populate cache miss)."""
-    key = (dex, pool_address)
-    if key in _pool_mints_cache:
-        return _pool_mints_cache[key]
-    # Not in cache — compute and cache the miss so we don't re-query.
-    from common.live_preflight import fetch_pool_mints  # circular‑import safe at module level
-    result = fetch_pool_mints(dex, pool_address, rpc_url, timeout)
-    _pool_mints_cache[key] = result
-    return result
 
 
 def _cached_pool_tick(dex: str, pool_address: str, rpc_url: str) -> Optional[int]:
@@ -242,16 +226,6 @@ def signal_age_seconds(signal: Dict[str, Any]) -> Optional[float]:
     return (datetime.now(timezone.utc) - created).total_seconds()
 
 
-def check_freshness(signal: Dict[str, Any], cfg: Dict[str, Any]) -> None:
-    """Public freshness gate: raise when the signal is older than the window.
-
-    Exposed so callers that must reason about freshness *before* running full
-    validation (e.g. the dispatcher's per-wake prep cap) do not duplicate the
-    age arithmetic.
-    """
-    _check_freshness(signal, cfg)
-
-
 def _check_freshness(signal: Dict[str, Any], cfg: Dict[str, Any]) -> None:
     age = signal_age_seconds(signal)
     if age is None:
@@ -463,7 +437,8 @@ def validate_core(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, 
     return signal
 
 
-def validate(signal_path: Path, cfg: Dict[str, Any], rails: Dict[str, Any]) -> Dict[str, Any]:
-    """Validate a signal file."""
-    signal = load_json(signal_path)
-    return validate_core(signal, cfg, rails)
+__all__ = [
+    "SignalValidationError",
+    "signal_age_seconds",
+    "validate_core",
+]

@@ -14,13 +14,6 @@ export function asTransactions(input) {
   throw new Error("unknown transaction type returned by SDK");
 }
 
-export function extraSignersFrom(input) {
-  if (!input) return [];
-  if (Array.isArray(input)) return input.map(extraSignersFrom).flat();
-  if (input.signers && Array.isArray(input.signers)) return input.signers.filter(Boolean);
-  return [];
-}
-
 export function txToBase64(tx) {
   if (tx instanceof VersionedTransaction) return Buffer.from(tx.serialize()).toString("base64");
   if (tx instanceof Transaction) return tx.serialize({ requireAllSignatures: false }).toString("base64");

@@ -54,14 +54,6 @@ DEFAULT_RAILS: Dict[str, Any] = {
 }
 
 
-def _nested_get(d: Dict[str, Any], *keys: str, default: Any = None) -> Any:
-    for key in keys:
-        if not isinstance(d, dict):
-            return default
-        d = d.get(key, default)
-    return d
-
-
 def _load_execution_limits() -> Dict[str, Any]:
     """Load mechanical execution limits from JSON.
 

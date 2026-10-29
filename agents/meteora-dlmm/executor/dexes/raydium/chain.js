@@ -19,7 +19,7 @@ import {
 } from "@raydium-io/raydium-sdk-v2";
 import BN from "bn.js";
 import { signAndSend, simulate, txToBase64 } from "../../chain/tx.js";
-import { fetchUsdPrices, SOL_MINT } from "../../chain/prices.js";
+import { fetchUsdPrices } from "../../chain/prices.js";
 
 let raydiumCache = null;
 

@@ -6,7 +6,7 @@
  */
 
 import process from "node:process";
-import { Keypair, PublicKey } from "@solana/web3.js";
+import { Keypair } from "@solana/web3.js";
 import bs58 from "bs58";
 
 const stderrLog = (...args) => process.stderr.write(args.map(String).join(" ") + "\n");
@@ -88,45 +88,4 @@ export function loadKeypair() {
     return Keypair.fromSeed(bytes);
   }
   throw new Error(`keypair material unexpected length ${bytes.length}; expected 32 or 64 bytes`);
-}
-
-export function publicKeyWallet(publicKey) {
-  return { publicKey: new PublicKey(publicKey) };
-}
-
-export function parseFlags(argv) {
-  const flags = { _: [] };
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg.startsWith("--")) {
-      const key = arg.slice(2);
-      const next = argv[i + 1];
-      if (next !== undefined && !next.startsWith("--")) {
-        flags[key] = next;
-        i++;
-      } else {
-        flags[key] = true;
-      }
-    } else {
-      flags._.push(arg);
-    }
-  }
-  return flags;
-}
-
-export function toRawAmount(value, decimals) {
-  if (value === undefined || value === null || value === "") return 0n;
-  if (typeof value === "string" && /^[0-9]+$/.test(value)) return BigInt(value);
-  if (typeof value === "number" && Number.isInteger(value)) return BigInt(value);
-  const s = String(value);
-  if (!/^-?\d+(\.\d+)?$/.test(s)) throw new Error(`invalid amount: ${s}`);
-  const neg = s.startsWith("-");
-  const [intPart, fracPart = ""] = s.replace("-", "").split(".");
-  const padded = (fracPart + "0".repeat(decimals)).slice(0, decimals);
-  const raw = BigInt(intPart + padded);
-  return neg ? -raw : raw;
-}
-
-export function okResponse(base, extra = {}) {
-  return { ok: true, ...base, ...extra };
 }

@@ -702,13 +702,9 @@ def reconcile_positions(scan_positions: List[Dict[str, Any]],
             })
             changed = True
             continue
-        # id-less legacy entry: pool-count fallback. The pool is fully
-        # accounted for when the scan shows no more open rows than we
-        # already track for it.
-        if scan_by_pool.get(key, 0) >= sum(
-                1 for e in open_positions if _scan_key(e) == key):
-            kept.append(entry)
-            continue
+        # id-less legacy entry: it cannot be matched by identity, so it is
+        # kept rather than guessed at. (The old code computed a pool-count
+        # comparison here and then took the same branch either way.)
         kept.append(entry)
 
     open_positions = kept

@@ -29,29 +29,22 @@ import urllib.request
 from typing import Any, Callable, Dict, Optional, Tuple
 
 # --------------------------------------------------------------------------
-# In-wake caches for pool state (populated by dispatcher.run_once())
+# In-wake cache for pool state (populated by dispatcher.run_once())
 # --------------------------------------------------------------------------
 _pool_mints_cache: Dict[tuple, Optional[tuple]] = {}
-_pool_tick_cache: Dict[tuple, Optional[int]] = {}
-
-# --------------------------------------------------------------------------
-# In-wake caches for wallet balances (populated by dispatcher.run_once())
-# --------------------------------------------------------------------------
-_wallet_sol_cache: Dict[tuple, int] = {}
-_wallet_token_cache: Dict[tuple, Dict[str, int]] = {}
 
 
 def clear_preflight_caches() -> None:
-    """Drop all in-wake caches.
+    """Drop the in-wake pool-mints cache.
 
     Called by the dispatcher after each processed signal: a mid-wake swap
-    changes real SOL/USDC balances, so a later open in the same wake must
-    re-read live state, not spend a previous leg's balances twice.
+    changes the pool's state and a later open in the same wake must not
+    reason from an earlier leg's read.
+
+    Wallet balances are deliberately NOT cached anywhere (see the comment in
+    ``preflight_open``): balances are re-read live for every signal.
     """
     _pool_mints_cache.clear()
-    _pool_tick_cache.clear()
-    _wallet_sol_cache.clear()
-    _wallet_token_cache.clear()
 
 
 WSOL_MINT = "So11111111111111111111111111111111111111112"
@@ -74,7 +67,6 @@ _POOL_LAYOUT = {
 }
 
 _B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-_B58_INDEX = {c: i for i, c in enumerate(_B58_ALPHABET)}
 
 # Conservative, rails-overridable defaults. The per-DEX overhead covers the
 # position account plus (Meteora) bin-array rent the opener funds; it is a
@@ -115,19 +107,6 @@ def b58encode(raw: bytes) -> str:
             break
         pad += 1
     return "1" * pad + out
-
-
-def b58decode(value: str) -> bytes:
-    num = 0
-    for char in value:
-        num = num * 58 + _B58_INDEX[char]
-    body = num.to_bytes((num.bit_length() + 7) // 8, "big") if num else b""
-    pad = 0
-    for char in value:
-        if char != "1":
-            break
-        pad += 1
-    return b"\x00" * pad + body
 
 
 # --------------------------------------------------------------------------

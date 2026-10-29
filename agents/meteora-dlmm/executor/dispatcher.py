@@ -777,12 +777,6 @@ def _handle_self_verify(signal: Dict[str, Any], signal_path: Path,
     return _move_to_processed(signal_path)
 
 
-def _summarise_simulation(sim: Any) -> str:
-    if isinstance(sim, list):
-        return f"{len(sim)} tx(s); first ok={sim[0].get('ok') if sim else 'n/a'}"
-    return f"ok={sim.get('ok')} err={sim.get('err')} units={sim.get('units_consumed')}"
-
-
 def _get_dex_module(dex: str):
     if dex == "meteora":
         from dexes.meteora import validator as dex_validator  # noqa: F401

@@ -62,7 +62,6 @@ class MeteoraBinStepRailTests(unittest.TestCase):
         # The validator caches pool ticks in-wake; clear per test so mocked
         # fetch values never leak across tests sharing a pool address.
         signal_validator._pool_tick_cache.clear()
-        signal_validator._pool_mints_cache.clear()
 
     @patch("common.signal_validator.fetch_pool_current_tick", return_value=-5299)
     @patch("common.signal_validator.fetch_pool_bin_step", return_value=4)

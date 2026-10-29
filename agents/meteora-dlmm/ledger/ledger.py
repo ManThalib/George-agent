@@ -363,10 +363,8 @@ def main() -> int:
     if args.cmd == "backfill":
         result = backfill(args.days)
     else:
-        result = reconcile_journal(0, date.fromisoformat(args.date)) or {"added": 0}
-        # reconcile with days=0 reads nothing; do a targeted single-day pass
-        end = date.fromisoformat(args.date)
-        result = reconcile_journal(1, end)
+        # Single-day pass: reconcile_journal counts backwards from `end`.
+        result = reconcile_journal(1, date.fromisoformat(args.date))
     print(json.dumps(result, indent=1))
     return 0
 

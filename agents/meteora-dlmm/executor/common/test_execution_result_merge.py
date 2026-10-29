@@ -14,7 +14,6 @@ while state/exposure_state.json held the same position with position_id null.
 """
 
 import json
-import os
 import shutil
 import sys
 import tempfile

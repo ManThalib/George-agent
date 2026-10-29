@@ -56,10 +56,7 @@ class SolPreflightTests(unittest.TestCase):
     def setUp(self):
         # Commit 9303157 added in-wake caches to live_preflight; clear them
         # so each test exercises its own injected fetchers.
-        lp._pool_mints_cache.clear()
-        lp._pool_tick_cache.clear()
-        lp._wallet_sol_cache.clear()
-        lp._wallet_token_cache.clear()
+        lp.clear_preflight_caches()
 
     def test_insufficient_sol_rejected_with_mechanical_code(self):
         sol, tok, mints = fetchers(44_263_180, {}, (USDC, TOKEN_B))
@@ -113,10 +110,7 @@ class SolPreflightTests(unittest.TestCase):
 class TokenPreflightTests(unittest.TestCase):
 
     def setUp(self):
-        lp._pool_mints_cache.clear()
-        lp._pool_tick_cache.clear()
-        lp._wallet_sol_cache.clear()
-        lp._wallet_token_cache.clear()
+        lp.clear_preflight_caches()
 
     def test_insufficient_token_x_rejected(self):
         sol, tok, mints = fetchers(1_000_000_000, {TOKEN_B: 10_000_000},
@@ -163,10 +157,7 @@ class TokenPreflightTests(unittest.TestCase):
 class SolPairAwareTests(unittest.TestCase):
 
     def setUp(self):
-        lp._pool_mints_cache.clear()
-        lp._pool_tick_cache.clear()
-        lp._wallet_sol_cache.clear()
-        lp._wallet_token_cache.clear()
+        lp.clear_preflight_caches()
 
     def test_wsol_side_funded_from_native_sol(self):
         # WSOL on the X side: no SPL WSOL account needed; native SOL covers it.
@@ -213,10 +204,7 @@ class SolPairAwareTests(unittest.TestCase):
 class DexSpecificTests(unittest.TestCase):
 
     def setUp(self):
-        lp._pool_mints_cache.clear()
-        lp._pool_tick_cache.clear()
-        lp._wallet_sol_cache.clear()
-        lp._wallet_token_cache.clear()
+        lp.clear_preflight_caches()
 
     def test_meteora_overhead_exceeds_orca(self):
         # Same balances, same liquidity: Meteora's bin-array rent makes the
@@ -238,10 +226,7 @@ class DexSpecificTests(unittest.TestCase):
 class FailClosedTests(unittest.TestCase):
 
     def setUp(self):
-        lp._pool_mints_cache.clear()
-        lp._pool_tick_cache.clear()
-        lp._wallet_sol_cache.clear()
-        lp._wallet_token_cache.clear()
+        lp.clear_preflight_caches()
 
     def test_sol_read_failure_fails_closed(self):
         def boom(*a, **k):

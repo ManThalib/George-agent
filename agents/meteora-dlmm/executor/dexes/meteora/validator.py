@@ -1,6 +1,6 @@
 """Meteora DLMM signal validator."""
 
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from common import signal_validator
 from common.bin_step_rail import (

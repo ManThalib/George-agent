@@ -4,7 +4,7 @@
 
 import { Keypair, PublicKey } from "@solana/web3.js";
 import { createRequire } from "module";
-import { log, respondError } from "../../chain/common.js";
+import { log } from "../../chain/common.js";
 import { asTransactions, signAndSend, simulate, txToBase64 } from "../../chain/tx.js";
 
 const require = createRequire(import.meta.url);

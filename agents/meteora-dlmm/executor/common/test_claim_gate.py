@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Tests for the raydium claim gate: builder rail + dispatcher skip routing."""
 
-import json
 import os
 import sys
 import unittest
