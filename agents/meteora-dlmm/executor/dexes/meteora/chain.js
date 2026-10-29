@@ -6,25 +6,19 @@ import { Keypair, PublicKey } from "@solana/web3.js";
 import { createRequire } from "module";
 import { log } from "../../chain/common.js";
 import { asTransactions, signAndSend, simulate, txToBase64 } from "../../chain/tx.js";
+import { deltaWithinBand, METEORA_AMOUNTS_BAND_PCT } from "../../chain/amounts.js";
 
 const require = createRequire(import.meta.url);
 const DLMM = require("@meteora-ag/dlmm");
+const BN = require("bn.js");
 const StrategyType = DLMM.StrategyType;
 
-function withinOnePct(got, want) {
-  // Compare BigInt raw amounts with tolerance. A zero request must stay
-  // zero: any deposit on that side means the wrong token went in.
-  // Band is 10% per side (was 1%): between Sheldon's quote and execution
-  // the pair price moves; live 2026-10-16 a CORRECT open deposited
-  // x +3.85% / y -3.85% and the 1% band flagged it amounts_ok:false.
-  // Wrong-side deposits (sign flips, zero-request violations) still fail
-  // hard; George's swap slippage caps are unchanged.
-  const AMOUNTS_BAND_PCT = 10n;
-  if (got > 0n && want > 0n) {
-    const diff = got > want ? got - want : want - got;
-    return diff * 100n <= want * AMOUNTS_BAND_PCT;
-  }
-  return got === want; // both zero, or one side zero where request zero/nonzero
+function amountsOk(got, want) {
+  // A zero request must stay zero: any deposit on that side means the wrong
+  // token went in. The 10% band absorbs price movement between Sheldon's quote
+  // and execution (live 2026-10-16: a CORRECT open deposited x +3.85% /
+  // y -3.85%); wrong-side deposits still fail hard.
+  return deltaWithinBand(got, want, METEORA_AMOUNTS_BAND_PCT);
 }
 
 async function verifyOpen(req, connection, wallet, positionPubKey) {
@@ -39,8 +33,8 @@ async function verifyOpen(req, connection, wallet, positionPubKey) {
     const { amount_x = "0", amount_y = "0" } = req.liquidity || {};
     const got_x = BigInt(pd.totalXAmount?.toString() ?? "0");
     const got_y = BigInt(pd.totalYAmount?.toString() ?? "0");
-    const amounts_ok = withinOnePct(got_x, BigInt(amount_x || "0"))
-      && withinOnePct(got_y, BigInt(amount_y || "0"));
+    const amounts_ok = amountsOk(got_x, BigInt(amount_x || "0"))
+      && amountsOk(got_y, BigInt(amount_y || "0"));
     return {
       ok: range_ok && amounts_ok,
       position_found: true,
@@ -75,7 +69,6 @@ export async function openPosition(req, connection, wallet) {
   const slippagePct = (req.max_slippage_bps ?? 100) / 100;
 
   const positionKeypair = Keypair.generate();
-  const BN = require("bn.js");
 
   // Active-bin deposit-side guard (live 2026-10-10, bug #7): the active bin
   // can drift past the range between the Python tick check and this build.
@@ -158,7 +151,6 @@ export async function closePosition(req, connection, wallet) {
       BigInt(b.positionFeeYAmount || "0") > 0n ||
       (b.positionRewardAmount || ["0", "0"]).some((r) => BigInt(r || "0") > 0n)
   );
-  const BN = require("bn.js");
   let removeTxs = [];
   let claimAndCloseTxs = [];
   let closeOnlyTx = null;
@@ -310,8 +302,8 @@ async function verifyAdd(req, connection, positionPubKey, before) {
     const { amount_x = "0", amount_y = "0" } = req.liquidity || {};
     const gotX = after.x > before.x ? after.x - before.x : 0n;
     const gotY = after.y > before.y ? after.y - before.y : 0n;
-    const x_ok = withinOnePct(gotX, BigInt(amount_x || "0"));
-    const y_ok = withinOnePct(gotY, BigInt(amount_y || "0"));
+    const x_ok = amountsOk(gotX, BigInt(amount_x || "0"));
+    const y_ok = amountsOk(gotY, BigInt(amount_y || "0"));
     return {
       ok: x_ok && y_ok,
       position_found: true,
@@ -383,7 +375,6 @@ export async function addLiquidity(req, connection, wallet) {
   }
 
   const { amount_x = "0", amount_y = "0" } = req.liquidity || {};
-  const BN = require("bn.js");
   const slippagePct = (req.max_slippage_bps ?? 100) / 100;
   const before = positionTotals(position);
 
@@ -446,7 +437,6 @@ export async function removeLiquidity(req, connection, wallet) {
 
   const fromBinId = Math.min(...bins.map((b) => b.binId));
   const toBinId = Math.max(...bins.map((b) => b.binId));
-  const BN = require("bn.js");
   const before = positionTotals(position);
 
   let txs;

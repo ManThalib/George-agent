@@ -17,6 +17,21 @@ import * as jupiter from "./jupiter.js";
 
 const DEX_HANDLERS = { meteora, raydium, orca, jupiter };
 
+// Action -> handler export. Dispatch used to be an if/else-if chain whose last
+// branch was the swap; an action the module did not export fell through with
+// `result === undefined`, and the response was still {ok: true}. A signal for
+// an unimplemented action (e.g. orca add_liquidity) therefore looked to the
+// executor like a successful transaction. Look the handler up and require it
+// to exist.
+const ACTION_HANDLERS = {
+  open: "openPosition",
+  close: "closePosition",
+  claim: "claimFees",
+  add_liquidity: "addLiquidity",
+  remove_liquidity: "removeLiquidity",
+  swap: "swap",
+};
+
 function validateRequest(req) {
   if (!req) throw new Error("missing request");
   const required = ["dex", "action", "mode", "rpc_url", "wallet_public_key"];
@@ -26,6 +41,12 @@ function validateRequest(req) {
   if (!DEX_HANDLERS[req.dex]) throw new Error(`unsupported dex: ${req.dex}`);
   if (!["open", "close", "claim", "swap", "add_liquidity", "remove_liquidity"].includes(req.action)) throw new Error(`unsupported action: ${req.action}`);
   if (!["simulate", "send"].includes(req.mode)) throw new Error(`mode must be simulate or send, got ${req.mode}`);
+  const exportName = ACTION_HANDLERS[req.action];
+  if (typeof DEX_HANDLERS[req.dex][exportName] !== "function") {
+    throw new Error(
+      `dex ${req.dex} does not implement action ${req.action} (no ${exportName} export); refusing to report success`
+    );
+  }
 }
 
 async function main() {
@@ -63,13 +84,13 @@ async function main() {
     }
 
     const handler = DEX_HANDLERS[req.dex];
-    let result;
-    if (req.action === "open") result = await handler.openPosition(req, connection, wallet);
-    else if (req.action === "close") result = await handler.closePosition(req, connection, wallet);
-    else if (req.action === "claim") result = await handler.claimFees(req, connection, wallet);
-    else if (req.action === "add_liquidity") result = await handler.addLiquidity(req, connection, wallet);
-    else if (req.action === "remove_liquidity") result = await handler.removeLiquidity(req, connection, wallet);
-    else if (req.action === "swap") result = await jupiter.swap(req, connection, wallet);
+    const actionFn = handler[ACTION_HANDLERS[req.action]];
+    const result = await actionFn(req, connection, wallet);
+    if (!result || typeof result !== "object") {
+      // A handler that returns nothing cannot be verified downstream (no
+      // signature, no verify block); treat it as a failure, not a success.
+      throw new Error(`dex ${req.dex} action ${req.action} returned no result object`);
+    }
 
     respond({ ok: true, dex: req.dex, action: req.action, mode: req.mode, ...result }, () => {
       if (req.mode === "send") process.exit(0);

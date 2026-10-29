@@ -7,6 +7,7 @@ import { buildWhirlpoolClient, ORCA_WHIRLPOOL_PROGRAM_ID, WhirlpoolContext, Pric
 import BN from "bn.js";
 import Decimal from "decimal.js";
 import { signAndSend, simulate, txToBase64 } from "../../chain/tx.js";
+import { alignTick, withinDepositMax } from "../../chain/amounts.js";
 
 function walletStub(publicKey) {
   return {
@@ -25,20 +26,6 @@ function makeClient(connection, publicKey) {
 async function buildPayload(builder) {
   const payload = await builder.build();
   return { tx: payload.transaction, signers: payload.signers ?? [] };
-}
-
-function withinOnePct(got, want) {
-  if (want === 0n) return got === 0n;
-  const diff = got > want ? got - want : want - got;
-  return diff * 100n <= want;
-}
-
-// Requested amounts are DEPOSIT MAXES (live 2026-10-10, bug #11): the pool
-// takes what the range actually needs, so a straddle near a range edge
-// legitimately deposits far less than the max. Verify as an upper bound;
-// a zero/over deposit fails.
-function withinMax(got, want) {
-  return got * 100n <= want * 102n;
 }
 
 const Q64 = new Decimal(2).pow(64);
@@ -76,9 +63,8 @@ async function verifyOpen(req, connection, wallet, positionMint, pool) {
     // -22802/-22522, correctly executed -22800/-22520, verify said
     // range_ok:false).
     const tickSpacing = Number(pool.getData().tickSpacing);
-    const alignTick = (t) => Math.round(Number(t) / tickSpacing) * tickSpacing;
-    const expectedLower = alignTick(req.bin_range?.lower ?? NaN);
-    const expectedUpper = alignTick(req.bin_range?.upper ?? NaN);
+    const expectedLower = alignTick(req.bin_range?.lower ?? NaN, tickSpacing);
+    const expectedUpper = alignTick(req.bin_range?.upper ?? NaN, tickSpacing);
     const range_ok = tickLower === expectedLower && tickUpper === expectedUpper;
     const liquidity = new BN(data.liquidity.toString());
     const { amount_x = "0", amount_y = "0" } = req.liquidity || {};
@@ -88,8 +74,8 @@ async function verifyOpen(req, connection, wallet, positionMint, pool) {
       const tickCurrent = Number(pool.getData().tickCurrentIndex);
       const { amountX, amountY } = amountsForLiquidity(liquidity, tickLower, tickUpper, tickCurrent);
       amounts_ok = liquidity.gt(new BN(0))
-        && withinMax(BigInt(amountX), BigInt(amount_x || "0"))
-        && withinMax(BigInt(amountY), BigInt(amount_y || "0"));
+        && withinDepositMax(BigInt(amountX), BigInt(amount_x || "0"))
+        && withinDepositMax(BigInt(amountY), BigInt(amount_y || "0"));
       derived = { derived_x_raw: amountX, derived_y_raw: amountY };
     } catch (err) {
       derived = { derived_error: err.message };
@@ -148,9 +134,8 @@ export async function openPosition(req, connection, wallet) {
   const client = makeClient(connection, wallet.publicKey);
   const pool = await client.getPool(new PublicKey(poolAddress));
   const tickSpacing = Number(pool.getData().tickSpacing);
-  const alignTick = (t) => Math.round(Number(t) / tickSpacing) * tickSpacing;
-  const tickLower = alignTick(lower);
-  const tickUpper = alignTick(upper);
+  const tickLower = alignTick(lower, tickSpacing);
+  const tickUpper = alignTick(upper, tickSpacing);
   if (tickLower >= tickUpper) throw new Error(`orca open invalid bin_range: ${tickLower} >= ${tickUpper}`);
 
   const input = liquidityInputForOpen(pool, slippageBps, amount_x, amount_y);

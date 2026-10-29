@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Multi-DEX executor chain layer: builds, simulates, signs and sends Meteora DLMM / Raydium CLMM / Orca Whirlpool transactions. Speaks JSON on stdin/stdout.",
-  "scripts": {},
+  "scripts": {
+    "test": "node --test chain/*.test.js"
+  },
   "dependencies": {
     "@coral-xyz/anchor": "0.32.1",
     "@meteora-ag/dlmm": "1.9.14",
