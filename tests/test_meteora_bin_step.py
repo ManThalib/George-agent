@@ -181,14 +181,17 @@ class MeteoraBinStepRailTests(unittest.TestCase):
 class BinStepFetchDecodeTests(unittest.TestCase):
     """fetch_pool_bin_step decodes u16 at the Meteora LbPair offset 80."""
 
-    def _rpc_response(self, offset, value, size=653):
+    METEORA = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"
+
+    def _rpc_response(self, offset, value, owner, size=653):
         import base64
         import json as json_mod
 
         blob = bytearray(size)
         blob[offset : offset + 2] = int(value).to_bytes(2, "little", signed=False)
         body = json_mod.dumps(
-            {"result": {"value": {"data": [base64.b64encode(bytes(blob)).decode(), "base64"]}}}
+            {"result": {"value": {"owner": owner,
+                                  "data": [base64.b64encode(bytes(blob)).decode(), "base64"]}}}
         ).encode()
         resp = MagicMock()
         resp.__enter__ = MagicMock(return_value=MagicMock(read=MagicMock(return_value=body)))
@@ -197,7 +200,7 @@ class BinStepFetchDecodeTests(unittest.TestCase):
 
     @patch("common.signal_validator.urllib.request.urlopen")
     def test_meteora_bin_step_decoded_at_offset_80(self, mock_urlopen):
-        mock_urlopen.return_value = self._rpc_response(80, 4)
+        mock_urlopen.return_value = self._rpc_response(80, 4, self.METEORA)
         step = signal_validator.fetch_pool_bin_step("meteora", "Addr", "https://rpc.test")
         self.assertEqual(step, 4)
 

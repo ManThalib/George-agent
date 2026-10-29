@@ -142,7 +142,10 @@ class TickContainmentGuardTests(unittest.TestCase):
 class TickFetchDecodeTests(unittest.TestCase):
     """fetch_pool_current_tick decodes i32 at the per-DEX offsets."""
 
-    def _rpc_response(self, offset, value, size=653):
+    ORCA = "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"
+    METEORA = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"
+
+    def _rpc_response(self, offset, value, owner, size=653):
         import base64
         import json as json_mod
         from unittest.mock import MagicMock
@@ -150,7 +153,8 @@ class TickFetchDecodeTests(unittest.TestCase):
         blob = bytearray(size)
         blob[offset : offset + 4] = value.to_bytes(4, "little", signed=True)
         body = json_mod.dumps(
-            {"result": {"value": {"data": [base64.b64encode(bytes(blob)).decode(), "base64"]}}}
+            {"result": {"value": {"owner": owner,
+                                  "data": [base64.b64encode(bytes(blob)).decode(), "base64"]}}}
         ).encode()
         resp = MagicMock()
         resp.__enter__ = MagicMock(return_value=MagicMock(read=MagicMock(return_value=body)))
@@ -161,7 +165,7 @@ class TickFetchDecodeTests(unittest.TestCase):
     def test_orca_tick_decoded_at_offset_81(self, mock_urlopen):
         from common.signal_validator import fetch_pool_current_tick
 
-        mock_urlopen.return_value = self._rpc_response(81, 26726)
+        mock_urlopen.return_value = self._rpc_response(81, 26726, self.ORCA)
         tick = fetch_pool_current_tick("orca", "PoolAddr", "https://rpc.test")
         self.assertEqual(tick, 26726)
 
@@ -169,7 +173,7 @@ class TickFetchDecodeTests(unittest.TestCase):
     def test_meteora_bin_decoded_at_offset_76(self, mock_urlopen):
         from common.signal_validator import fetch_pool_current_tick
 
-        mock_urlopen.return_value = self._rpc_response(76, -5333)
+        mock_urlopen.return_value = self._rpc_response(76, -5333, self.METEORA)
         tick = fetch_pool_current_tick("meteora", "PoolAddr", "https://rpc.test")
         self.assertEqual(tick, -5333)
 
@@ -184,6 +188,72 @@ class TickFetchDecodeTests(unittest.TestCase):
         from common.signal_validator import fetch_pool_current_tick
 
         self.assertIsNone(fetch_pool_current_tick("orca", "Addr", ""))
+
+
+class PoolOwnerGuardTests(unittest.TestCase):
+    """A pool account must be owned by its DEX program before it is decoded.
+
+    Without this check, bytes from any account could decode to a plausible
+    tick and pass the containment guard — a fail-open rail in a fail-closed
+    system. live_preflight already verified the owner; this path did not.
+    """
+
+    ORCA = "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"
+    METEORA = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"
+    WRONG = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+    def _response(self, owner, offset=81, value=26726, size=653):
+        import base64
+        import json as json_mod
+        from unittest.mock import MagicMock
+
+        blob = bytearray(size)
+        blob[offset:offset + 4] = value.to_bytes(4, "little", signed=True)
+        payload = {"result": {"value": {"owner": owner,
+                                        "data": [base64.b64encode(bytes(blob)).decode(),
+                                                 "base64"]}}}
+        body = json_mod.dumps(payload).encode()
+        resp = MagicMock()
+        resp.__enter__ = MagicMock(return_value=MagicMock(read=MagicMock(return_value=body)))
+        resp.__exit__ = MagicMock(return_value=False)
+        return resp
+
+    @patch("common.signal_validator.urllib.request.urlopen")
+    def test_correct_owner_decodes(self, mock_urlopen):
+        from common.signal_validator import fetch_pool_current_tick
+
+        mock_urlopen.return_value = self._response(self.ORCA)
+        self.assertEqual(
+            fetch_pool_current_tick("orca", "PoolAddr", "https://rpc.test"), 26726)
+
+    @patch("common.signal_validator.urllib.request.urlopen")
+    def test_wrong_owner_is_refused(self, mock_urlopen):
+        from common.signal_validator import fetch_pool_current_tick
+
+        mock_urlopen.return_value = self._response(self.WRONG)
+        self.assertIsNone(fetch_pool_current_tick("orca", "PoolAddr", "https://rpc.test"))
+
+    @patch("common.signal_validator.urllib.request.urlopen")
+    def test_missing_owner_is_refused(self, mock_urlopen):
+        from common.signal_validator import fetch_pool_current_tick
+
+        mock_urlopen.return_value = self._response(None)
+        self.assertIsNone(fetch_pool_current_tick("orca", "PoolAddr", "https://rpc.test"))
+
+    @patch("common.signal_validator.urllib.request.urlopen")
+    def test_bin_step_wrong_owner_is_refused(self, mock_urlopen):
+        from common.signal_validator import fetch_pool_bin_step
+
+        mock_urlopen.return_value = self._response(self.WRONG, offset=80)
+        self.assertIsNone(fetch_pool_bin_step("meteora", "PoolAddr", "https://rpc.test"))
+
+    @patch("common.signal_validator.urllib.request.urlopen")
+    def test_bin_step_correct_owner_decodes(self, mock_urlopen):
+        from common.signal_validator import fetch_pool_bin_step
+
+        mock_urlopen.return_value = self._response(self.METEORA, offset=80)
+        self.assertEqual(
+            fetch_pool_bin_step("meteora", "PoolAddr", "https://rpc.test"), 26726)
 
 
 if __name__ == "__main__":

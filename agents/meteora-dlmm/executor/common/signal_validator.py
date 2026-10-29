@@ -68,13 +68,31 @@ _BIN_STEP_DECODE_OFFSETS = {
 }
 
 
+# Owning program of each pool account. Decoding bytes from an account that is
+# not owned by the expected DEX program can yield a plausible-looking i32/u16,
+# which would let a wrong-account read pass the tick / bin-step rails. The
+# preflight path already checks this (live_preflight._POOL_LAYOUT); the
+# validator path did not, so the guard was fail-open.
+_PROGRAM_IDS = {
+    "meteora": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+    "orca": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+    "raydium": "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
+}
+
+
 class SignalValidationError(Exception):
     pass
 
 
 def _fetch_pool_account_blob(pool_address: str, rpc_url: str,
-                             timeout: float) -> Optional[bytes]:
-    """Return the raw account bytes, or None when unavailable."""
+                             timeout: float,
+                             expected_program: Optional[str] = None) -> Optional[bytes]:
+    """Return the raw account bytes, or None when unavailable.
+
+    ``expected_program`` fails the read closed when the account is owned by a
+    different program (or when the RPC omits the owner): a wrong-layout decode
+    must never be mistaken for a market read.
+    """
     if not pool_address or not rpc_url:
         return None
     try:
@@ -91,6 +109,8 @@ def _fetch_pool_account_blob(pool_address: str, rpc_url: str,
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             result = json.loads(resp.read().decode("utf-8"))
         value = (result or {}).get("result", {}).get("value") or {}
+        if expected_program is not None and value.get("owner") != expected_program:
+            return None
         data = value.get("data")
         raw = data[0] if isinstance(data, list) and data else data
         if not isinstance(raw, str):
@@ -103,10 +123,12 @@ def _fetch_pool_account_blob(pool_address: str, rpc_url: str,
 def fetch_pool_current_tick(dex: str, pool_address: str, rpc_url: str,
                             timeout: float = 10.0) -> Optional[int]:
     """Return the pool's live current tick/bin, or None when unavailable."""
-    offset = _TICK_DECODE_OFFSETS.get((dex or "").lower())
+    dex_key = (dex or "").lower()
+    offset = _TICK_DECODE_OFFSETS.get(dex_key)
     if not offset:
         return None
-    blob = _fetch_pool_account_blob(pool_address, rpc_url, timeout)
+    blob = _fetch_pool_account_blob(pool_address, rpc_url, timeout,
+                                    _PROGRAM_IDS.get(dex_key))
     if blob is None or len(blob) < offset + 4:
         return None
     return int.from_bytes(blob[offset : offset + 4], "little", signed=True)
@@ -115,10 +137,12 @@ def fetch_pool_current_tick(dex: str, pool_address: str, rpc_url: str,
 def fetch_pool_bin_step(dex: str, pool_address: str, rpc_url: str,
                         timeout: float = 10.0) -> Optional[int]:
     """Return the pool's on-chain bin/tick step (u16), or None when unavailable."""
-    offset = _BIN_STEP_DECODE_OFFSETS.get((dex or "").lower())
+    dex_key = (dex or "").lower()
+    offset = _BIN_STEP_DECODE_OFFSETS.get(dex_key)
     if not offset:
         return None
-    blob = _fetch_pool_account_blob(pool_address, rpc_url, timeout)
+    blob = _fetch_pool_account_blob(pool_address, rpc_url, timeout,
+                                    _PROGRAM_IDS.get(dex_key))
     if blob is None or len(blob) < offset + 2:
         return None
     return int.from_bytes(blob[offset : offset + 2], "little", signed=False)
