@@ -807,22 +807,40 @@ def _handle_self_verify(signal: Dict[str, Any], signal_path: Path,
     return _move_to_processed(signal_path)
 
 
-def _get_dex_module(dex: str):
+_DEX_REGISTRY: Dict[str, Tuple[Any, Any]] = {}
+
+
+def _get_dex_module(dex: str) -> Tuple[Any, Any]:
+    """(validate, build) callables for a DEX, imported once on first use.
+
+    Replaces three near-identical import triples. Kept as a function (rather
+    than a module-level dict of modules) because tests patch it to substitute
+    a fake DEX; the contract is unchanged: it returns (validator, builder).
+    """
+    if dex in _DEX_REGISTRY:
+        return _DEX_REGISTRY[dex]
     if dex == "meteora":
-        from dexes.meteora import validator as dex_validator  # noqa: F401
-        from dexes.meteora import builder as dex_builder
-        from dexes.meteora.validator import validate as dex_validate
+        from dexes.meteora import builder, validator
     elif dex == "orca":
-        from dexes.orca import validator as dex_validator  # noqa: F401
-        from dexes.orca import builder as dex_builder
-        from dexes.orca.validator import validate as dex_validate
+        from dexes.orca import builder, validator
     elif dex == "raydium":
-        from dexes.raydium import validator as dex_validator  # noqa: F401
-        from dexes.raydium import builder as dex_builder
-        from dexes.raydium.validator import validate as dex_validate
+        from dexes.raydium import builder, validator
     else:
         raise ValueError(f"unsupported dex: {dex}")
-    return dex_validate, dex_builder
+    # (validator callable, builder MODULE): callers use builder.build(...), and
+    # tests substitute a fake module, so the module is part of the contract.
+    _DEX_REGISTRY[dex] = (validator.validate, builder)
+    return _DEX_REGISTRY[dex]
+
+
+def _dex_builder(dex: str):
+    """The builder only — most call sites never use the validator."""
+    return _get_dex_module(dex)[1]
+
+
+def _dex_validator(dex: str):
+    """The validator only."""
+    return _get_dex_module(dex)[0]
 
 
 def _build_swap_request(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> Dict[str, Any]:
@@ -848,8 +866,7 @@ def _run_simulation(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str
         req = _build_swap_request(signal, cfg, rails)
     else:
         dex = signal.get("dex") or "meteora"
-        _dex_validate, dex_builder = _get_dex_module(dex)
-        req = dex_builder.build(signal, cfg, rails)
+        req = _dex_builder(dex).build(signal, cfg, rails)
 
     try:
         sim = chain_simulate(req)
@@ -882,8 +899,7 @@ def _do_send(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any])
         req = _build_swap_request(signal, cfg, rails)
     else:
         dex = signal.get("dex") or "meteora"
-        _dex_validate, dex_builder = _get_dex_module(dex)
-        req = dex_builder.build(signal, cfg, rails)
+        req = _dex_builder(dex).build(signal, cfg, rails)
 
     # Multi-wallet registry: resolve the wallet_id to its registered public
     # key. A mirror signal carrying an unregistered id (or a key mismatch)
@@ -976,7 +992,7 @@ def _run_mirror_legs(
                          "detail": "main leg not executed; open deferred"})
             continue
 
-        _dex_validate, dex_builder = _get_dex_module(leg_signal.get("dex") or "meteora")
+        dex_builder = _dex_builder(leg_signal.get("dex") or "meteora")
         try:
             leg_req = dex_builder.build(leg_signal, cfg, rails)
             registered = registry.get(wallet_id)
@@ -1160,8 +1176,7 @@ def process_signal(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str,
         signal = validate_core(signal, cfg, rails)
     else:
         dex = signal.get("dex") or "meteora"
-        dex_validate, _ = _get_dex_module(dex)
-        signal = dex_validate(signal, cfg, rails)
+        signal = _dex_validator(dex)(signal, cfg, rails)
 
     # Exposure / loss / drawdown guard: new opens and adds deploy capital;
     # removes are de-risking and always pass.
@@ -1604,8 +1619,7 @@ def do_approve(signal_id: str, cfg: Dict[str, Any], rails: Dict[str, Any]) -> No
             signal = validate_core(signal, cfg, rails)
         else:
             dex = signal.get("dex") or "meteora"
-            dex_validate, _ = _get_dex_module(dex)
-            signal = dex_validate(signal, cfg, rails)
+            signal = _dex_validator(dex)(signal, cfg, rails)
     except SignalValidationError as exc:
         print(f"Approval rejected: rails no longer pass: {exc}")
         sys.exit(1)
