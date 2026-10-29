@@ -58,14 +58,27 @@ import ledger as trade_ledger  # noqa: E402  (executor-local ledger module)
 # --------------------------------------------------------------------------
 # In-wake rails hash cache (avoid re-hashing SAFETY_RAILS.md per signal)
 # --------------------------------------------------------------------------
-_rails_hash_cache: Dict[str, str] = {}
+_rails_hash_cache: Dict[str, tuple] = {}
 
 
-def _cached_rails_hash(rails_path: str) -> str:
-    """Return cached rails hash, computing once per process lifetime."""
-    if rails_path not in _rails_hash_cache:
-        _rails_hash_cache[rails_path] = rails_hash(Path(rails_path))
-    return _rails_hash_cache[rails_path]
+def rails_hash_cached(rails_path: str) -> str:
+    """Rails hash, recomputed whenever the file changes.
+
+    Keyed by (size, mtime) as well as path: the previous version cached the
+    hash for the life of the process, so a long-running daemon journaled the
+    hash of a rails file it had stopped reading.
+    """
+    try:
+        stat = os.stat(rails_path)
+        stamp = f"{stat.st_size}:{stat.st_mtime_ns}"
+    except OSError:
+        return ""
+    cached = _rails_hash_cache.get(rails_path)
+    if cached and cached[0] == stamp:
+        return cached[1]
+    digest = rails_hash(Path(rails_path))
+    _rails_hash_cache[rails_path] = (stamp, digest)
+    return digest
 
 
 def _resolve_signals_dir() -> Path:
@@ -137,6 +150,10 @@ MAX_CLOSE_REENTRIES_PER_HOUR = 20
 # the open, or another prep swap). Depth bounds the in-process chain; the
 # hourly re-entry guard above is the outer backstop.
 MAX_CAPITAL_CHAIN_DEPTH = 3
+
+# Daemon heartbeat when the config itself cannot be read (the configured value
+# lives in the file, so it is unavailable on that path).
+DEFAULT_HEARTBEAT_SECONDS = 60
 
 # Prep swaps processed per run_once wake. A deferred-doorbell backlog used to
 # let several preps execute at once (seen live 2026-10-05 15:48: a double buy
@@ -1366,7 +1383,7 @@ def _trigger_close_refresh(cfg: Dict[str, Any], closes: List[Dict[str, Any]]) ->
                   "sheldon": sheldon_result,
                   "followup": followup_result,
                   "depth": depth},
-                _cached_rails_hash(str(RAILS_PATH)),
+                rails_hash_cached(str(RAILS_PATH)),
             )
         except Exception as exc:
             print(f"[{utc_now()}] close refresh journal failed: {exc}")
@@ -1562,7 +1579,7 @@ def process_signal_path(signal_path: Path, cfg: Dict[str, Any], rails: Dict[str,
         signal=signal,
         decision=journal_status,
         details=details,
-        rails_hash=_cached_rails_hash(str(RAILS_PATH)),
+        rails_hash=rails_hash_cached(str(RAILS_PATH)),
     )
     if status == "executed":
         try:
@@ -1606,7 +1623,7 @@ def do_approve(signal_id: str, cfg: Dict[str, Any], rails: Dict[str, Any]) -> No
             signal=signal,
             decision="rejected",
             details=reject,
-            rails_hash=_cached_rails_hash(str(RAILS_PATH)),
+            rails_hash=rails_hash_cached(str(RAILS_PATH)),
         )
         approvals_store.move_to(signal_id, approvals_store.REJECTED_DIR)
         print(f"Approval rejected: live preflight failed: {json.dumps(reject, default=str)}")
@@ -1617,7 +1634,7 @@ def do_approve(signal_id: str, cfg: Dict[str, Any], rails: Dict[str, Any]) -> No
         signal=signal,
         decision=decision,
         details=details,
-        rails_hash=_cached_rails_hash(str(RAILS_PATH)),
+        rails_hash=rails_hash_cached(str(RAILS_PATH)),
     )
     if decision == "executed":
         try:
@@ -1671,7 +1688,7 @@ def do_reject(signal_id: str, cfg: Dict[str, Any], rails: Dict[str, Any]) -> Non
         signal=record["signal"],
         decision="rejected_by_owner",
         details={"reason": "owner rejected approval"},
-        rails_hash=_cached_rails_hash(str(RAILS_PATH)),
+        rails_hash=rails_hash_cached(str(RAILS_PATH)),
     )
     print(f"{signal_id} -> rejected by owner")
 
@@ -1757,7 +1774,7 @@ def do_sweep_dust_swaps(cfg: Dict[str, Any], rails: Dict[str, Any]) -> None:
             signal=signal,
             decision=status,
             details=details,
-            rails_hash=_cached_rails_hash(str(RAILS_PATH)),
+            rails_hash=rails_hash_cached(str(RAILS_PATH)),
         )
         if status == "executed":
             try:
@@ -1854,8 +1871,23 @@ def main() -> None:
         return
 
     while True:
+        # Re-read the law and the config every wake. SAFETY_RAILS.md says the
+        # executor "re-reads it before every transaction"; the daemon used to
+        # load both once at start-up and then trade for days on a stale
+        # snapshot, so an owner edit (mode change, tightened cap) had no effect
+        # until a restart. One snapshot per wake is deliberate: every signal in
+        # a wake is judged by the same law.
+        try:
+            cfg = load_config()
+            rails = load_rails()
+        except ConfigError as exc:
+            # Do not trade on a config we cannot read; keep the loop alive so
+            # a transient bad edit does not take the executor down silently.
+            print(f"[{utc_now()}] CRITICAL config reload failed; idling: {exc}")
+            time.sleep(DEFAULT_HEARTBEAT_SECONDS)
+            continue
         _capital_epilogue(cfg, run_once(cfg, rails))
-        time.sleep(cfg.get("heartbeat_interval_seconds", 60))
+        time.sleep(cfg.get("heartbeat_interval_seconds", DEFAULT_HEARTBEAT_SECONDS))
 
 
 if __name__ == "__main__":
