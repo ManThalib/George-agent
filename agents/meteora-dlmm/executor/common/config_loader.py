@@ -1,7 +1,6 @@
 """Load and validate the executor config and safety rails."""
 
 import os
-from pathlib import Path
 from typing import Any, Dict
 
 from common.config_gate import live_config_path
@@ -12,8 +11,9 @@ from common.utils import load_json
 # pipeline's start gate and this loader cannot drift apart again. Before
 # 2026-10-18 they pointed at different files and disagreed (dry_run vs auto)
 # while the pipeline log still claimed "(dry_run)".
+# The rails path has a single owner too: common/rails_loader.py. This module
+# used to keep a second copy that could drift.
 CONFIG_PATH = live_config_path()
-RAILS_PATH = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/SAFETY_RAILS.md")
 
 
 class ConfigError(Exception):

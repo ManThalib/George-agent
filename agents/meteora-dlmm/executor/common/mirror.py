@@ -21,12 +21,13 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-STATE_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "..",
-    "state",
-    "mirror_sync.json",
-)
+from common import paths
+
+# The mirror state must live in the agent tree the dispatcher writes to. The
+# old value was relative to this checkout (executor/../state), which on the
+# live host is a different tree from the /data one.
+STATE_DIR = paths.state_dir()
+STATE_PATH = os.path.join(STATE_DIR, "mirror_sync.json")
 
 MIRRORABLE_ACTIONS = {"open", "close", "claim_fees", "claim_rewards", "add_liquidity", "remove_liquidity"}
 

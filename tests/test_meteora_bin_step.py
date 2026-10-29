@@ -1,10 +1,15 @@
 """Tests for the Meteora bin-step rail: no opens on pools whose on-chain
-bin_step is not in SAFETY_RAILS.md `allowed_bin_steps`.
+bin_step is outside the owner-approved `bin_step_rule` rail.
 
 Incident: a live position was opened on pool 5rCf1DM8LjKTw4YqhnoLcngyZYeNnQq
 ztScTogYHAS6 (SOL-USDC, bin_step 4) — the rail was declared but never
 enforced. The bin_step is read from the pool's live on-chain account
 (LbPair.bin_step, u16 @ 80), never from signal metadata.
+
+Rail history: this module originally pinned the `allowed_bin_steps` whitelist.
+Owner ruling 2026-10-19 replaced that whitelist with `bin_step_rule`
+(min 4 / max 400, execution_limits.json) — the whitelist tests were left
+behind and asserted the removed behaviour. They now pin the current rail.
 """
 
 import sys
@@ -26,7 +31,7 @@ CFG = {"signal_max_age_seconds": 300, "rpc_https_url": "https://rpc.test"}
 RAILS = {
     "max_slippage_bps": 100,
     "max_meteora_range_width": 70,
-    "allowed_bin_steps": [4, 10, 20, 25, 50, 100],
+    "bin_step_rule": {"min": 4, "max": 400},
 }
 
 
@@ -67,11 +72,24 @@ class MeteoraBinStepRailTests(unittest.TestCase):
 
     @patch("common.signal_validator.fetch_pool_current_tick", return_value=-5299)
     @patch("common.signal_validator.fetch_pool_bin_step", return_value=125)
-    def test_bin_step_125_rejected(self, _step, _tick):
+    def test_bin_step_125_allowed_under_owner_rule(self, _step, _tick):
+        """Owner ruling 2026-10-19: every bin_step >= 4 is allowed."""
+        signal = _validate(_open_signal())
+        self.assertEqual(signal["action"], "open")
+
+    @patch("common.signal_validator.fetch_pool_current_tick", return_value=-5299)
+    @patch("common.signal_validator.fetch_pool_bin_step", return_value=3)
+    def test_bin_step_3_rejected(self, _step, _tick):
         with self.assertRaises(SignalValidationError) as ctx:
             _validate(_open_signal())
-        self.assertIn("not in allowed_bin_steps", str(ctx.exception))
-        self.assertIn("125", str(ctx.exception))
+        self.assertIn("below owner minimum", str(ctx.exception))
+
+    @patch("common.signal_validator.fetch_pool_current_tick", return_value=-5299)
+    @patch("common.signal_validator.fetch_pool_bin_step", return_value=401)
+    def test_bin_step_above_protocol_max_rejected(self, _step, _tick):
+        with self.assertRaises(SignalValidationError) as ctx:
+            _validate(_open_signal())
+        self.assertIn("protocol maximum", str(ctx.exception))
 
     @patch("common.signal_validator.fetch_pool_current_tick", return_value=-5299)
     @patch("common.signal_validator.fetch_pool_bin_step", return_value=10)
@@ -94,7 +112,15 @@ class MeteoraBinStepRailTests(unittest.TestCase):
 
     @patch("common.signal_validator.fetch_pool_current_tick", return_value=-5299)
     @patch("common.signal_validator.fetch_pool_bin_step", return_value=4)
-    def test_missing_rail_falls_back_to_declared_default(self, _step, _tick):
+    def test_missing_rail_falls_back_to_owner_default(self, _step, _tick):
+        """A missing rail must resolve to the owner rule, never to "anything"."""
+        rails = {"max_slippage_bps": 100, "max_meteora_range_width": 70}
+        signal = _validate(_open_signal(), rails)
+        self.assertEqual(signal["action"], "open")
+
+    @patch("common.signal_validator.fetch_pool_current_tick", return_value=-5299)
+    @patch("common.signal_validator.fetch_pool_bin_step", return_value=3)
+    def test_missing_rail_still_rejects_below_owner_minimum(self, _step, _tick):
         rails = {"max_slippage_bps": 100, "max_meteora_range_width": 70}
         with self.assertRaises(SignalValidationError):
             _validate(_open_signal(), rails)
@@ -109,22 +135,22 @@ class MeteoraBinStepRailTests(unittest.TestCase):
     @patch("common.signal_validator.fetch_pool_current_tick", return_value=-5299)
     @patch("common.signal_validator.fetch_pool_bin_step", return_value=10)
     def test_tighter_custom_rail_rejects_10(self, _step, _tick):
-        rails = dict(RAILS, allowed_bin_steps=[25, 50])
+        rails = dict(RAILS, bin_step_rule={"min": 25, "max": 50})
         with self.assertRaises(SignalValidationError) as ctx:
             _validate(_open_signal(), rails)
-        self.assertIn("not in allowed_bin_steps", str(ctx.exception))
+        self.assertIn("below owner minimum", str(ctx.exception))
 
     @patch("common.signal_validator.fetch_pool_current_tick", return_value=-5299)
     @patch("common.signal_validator.fetch_pool_bin_step", return_value=25)
     def test_tighter_custom_rail_allows_25(self, _step, _tick):
-        rails = dict(RAILS, allowed_bin_steps=[25, 50])
+        rails = dict(RAILS, bin_step_rule={"min": 25, "max": 50})
         signal = _validate(_open_signal(), rails)
         self.assertEqual(signal["action"], "open")
 
     @patch("common.signal_validator.fetch_pool_current_tick", return_value=-5299)
     @patch("common.signal_validator.fetch_pool_bin_step", return_value=10)
     def test_malformed_rail_falls_back_to_default(self, _step, _tick):
-        rails = dict(RAILS, allowed_bin_steps="nonsense")
+        rails = dict(RAILS, bin_step_rule="nonsense")
         signal = _validate(_open_signal(), rails)
         self.assertEqual(signal["action"], "open")
 
@@ -206,14 +232,17 @@ class BinStepFetchDecodeTests(unittest.TestCase):
 
 
 class RailsLoaderListParsingTests(unittest.TestCase):
-    """SAFETY_RAILS.md is the source of truth; its allowed_bin_steps row
-    must actually parse (backticked keys, bracketed int lists)."""
+    """SAFETY_RAILS.md is the documentation of record; its rail rows must
+    actually parse (backticked keys, bracketed/numeric values)."""
 
-    def test_parse_markdown_rails_reads_allowed_bin_steps(self):
+    def test_parse_markdown_rails_reads_bin_step_rule(self):
         from common.rails_loader import RAILS_PATH, _parse_markdown_rails
 
         rails = _parse_markdown_rails(RAILS_PATH)
-        self.assertEqual(rails["allowed_bin_steps"], [4, 10, 20, 25, 50, 100])
+        rule = rails.get("bin_step_rule")
+        self.assertIsInstance(rule, dict)
+        self.assertEqual(rule["min"], 4)
+        self.assertEqual(rule["max"], 400)
 
     def test_parse_int_list_formats(self):
         from common.rails_loader import _parse_int_list

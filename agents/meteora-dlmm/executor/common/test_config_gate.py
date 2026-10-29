@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common import config_gate  # noqa: E402
+from common import paths  # noqa: E402
 
 
 def write_config(path: Path, mode: str) -> Path:
@@ -202,12 +203,15 @@ class RequireDryRunTests(GateTestBase):
 class PathResolutionTests(GateTestBase):
     def test_live_path_is_the_executor_default(self):
         os.environ.pop(config_gate.ENV_LIVE, None)
-        self.assertEqual(
-            config_gate.live_config_path(), config_gate.LIVE_CONFIG_PATH
-        )
-        self.assertIn(
-            "/workspace-agents/george/", str(config_gate.live_config_path())
-        )
+        os.environ.pop(paths.ENV_AGENT_ROOT, None)
+        resolved = config_gate.live_config_path()
+        self.assertEqual(resolved, config_gate.LIVE_CONFIG_PATH)
+        # The path is owned by common/paths.py: it must be a config file inside
+        # the resolved agent tree, whichever tree that is (live /data or this
+        # checkout), and never a module-local literal.
+        self.assertEqual(resolved, paths.config_path())
+        self.assertEqual(resolved.name, "agent.config.json")
+        self.assertEqual(resolved.parent.parent, paths.agent_root())
 
     def test_env_override_wins(self):
         os.environ[config_gate.ENV_LIVE] = str(self.live)

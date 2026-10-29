@@ -27,11 +27,16 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-AGENT_ROOT = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm")
-JOURNAL_DIR = AGENT_ROOT / "journal"
-SIGNALS_DIR = AGENT_ROOT / "signals"
-APPROVALS_DIR = AGENT_ROOT / "approvals"
-LEDGER_PATH = AGENT_ROOT / "ledger" / "ledger.jsonl"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "executor"))
+
+from common import paths  # noqa: E402  (executor-local module)
+
+
+AGENT_ROOT = paths.agent_root()
+JOURNAL_DIR = paths.journal_dir()
+SIGNALS_DIR = paths.signals_dir()
+APPROVALS_DIR = paths.approvals_dir()
+LEDGER_PATH = paths.ledger_path()
 
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 SOL_MINT = "So11111111111111111111111111111111111111112"
@@ -135,7 +140,7 @@ def _rpc_url() -> Optional[str]:
         if os.environ.get(name, "").strip():
             return os.environ[name].strip()
     try:
-        cfg = json.loads((AGENT_ROOT / "config" / "agent.config.json").read_text())
+        cfg = json.loads(paths.config_path().read_text())
         url = (cfg.get("rpc") or {}).get("https_url", "").strip()
         return url or None
     except Exception:

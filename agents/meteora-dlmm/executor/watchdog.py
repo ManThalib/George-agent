@@ -23,13 +23,20 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from common import paths  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent  # meteora-dlmm/
-JOURNAL_DIR = REPO / "journal"
-PENDING_DIR = REPO / "signals" / "pending"
-FAILED_VERIFY_DIR = REPO / "signals" / "failed_verify"
-DISPATCHER_LOCK = REPO / "state" / "dispatcher.lock"
-STATE_DIR = REPO / "state"
+# The watchdog must watch the directories the dispatcher actually writes. It
+# used to resolve REPO/"journal" and REPO/"signals"/"pending", which on the
+# live host are a different tree from the /data one the executor uses.
+JOURNAL_DIR = paths.journal_dir()
+PENDING_DIR = paths.signals_dir() / "pending"
+FAILED_VERIFY_DIR = paths.signals_dir() / "failed_verify"
+DISPATCHER_LOCK = paths.state_dir() / "dispatcher.lock"
+STATE_DIR = paths.state_dir()
 BALANCE_STATE = STATE_DIR / "watchdog_balance.json"
 
 # Tunables (analysis defaults; not rails — changing these never blocks a tx)

@@ -12,12 +12,13 @@ import re
 from pathlib import Path
 from typing import Any, Dict
 
+from common import paths
 from common.utils import load_json
 
 
-RAILS_PATH = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/SAFETY_RAILS.md")
-EXECUTION_LIMITS_PATH = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/execution_limits.json")
-SHELDON_POLICY_PATH = Path("/data/.openclaw/workspace-agents/sheldon/scoring/sheldon_policy.json")
+RAILS_PATH = paths.rails_path()
+EXECUTION_LIMITS_PATH = paths.execution_limits_path()
+SHELDON_POLICY_PATH = paths.sheldon_policy_path()
 
 DEFAULT_RAILS: Dict[str, Any] = {
     "max_position_usd": 100.0,

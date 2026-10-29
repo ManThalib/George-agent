@@ -4,10 +4,11 @@ import json
 from datetime import date
 from pathlib import Path
 
+from common import paths
 from common.utils import utc_now
 
 
-JOURNAL_DIR = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/journal")
+JOURNAL_DIR = paths.journal_dir()
 
 
 def append(signal: dict, decision: str, details: dict, rails_hash: str) -> None:

@@ -54,13 +54,18 @@ import os
 import sys
 from pathlib import Path
 
-LIVE_CONFIG_PATH = Path(
-    "/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/config/agent.config.json"
-)
-WORKSPACE_CONFIG_PATH = Path(
-    "/root/.openclaw-devdash/workspace/agents/George-agent"
-    "/agents/meteora-dlmm/config/agent.config.json"
-)
+# Runnable both as `python3 -m common.config_gate` and as a plain script (the
+# pipeline invokes it by path, and run_pipeline.sh must keep working).
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from common import paths  # noqa: E402  (after the script-mode path fix)
+
+# Paths come from common/paths.py so the gate, the loader, the journal and the
+# watchdog cannot point at different trees. ``live_config_path`` keeps its
+# historical name: it is the file the *executor* reads.
+LIVE_CONFIG_PATH = paths.config_path()
+WORKSPACE_CONFIG_PATH = paths.workspace_config_path()
 
 KNOWN_MODES = ("dry_run", "auto")
 
@@ -72,14 +77,12 @@ ENV_WORKSPACE = "GEORGE_WORKSPACE_CONFIG_PATH"
 
 def live_config_path() -> Path:
     """Path the *executor* reads. This is authoritative."""
-    override = os.environ.get(ENV_LIVE, "").strip()
-    return Path(override) if override else LIVE_CONFIG_PATH
+    return paths.config_path()
 
 
 def workspace_config_path() -> Path:
     """Path the pipeline gate historically read. Only used for drift checks."""
-    override = os.environ.get(ENV_WORKSPACE, "").strip()
-    return Path(override) if override else WORKSPACE_CONFIG_PATH
+    return paths.workspace_config_path()
 
 
 def read_mode(path) -> str:

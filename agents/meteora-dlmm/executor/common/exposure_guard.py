@@ -15,12 +15,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from common import paths
 
-STATE_DIR = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/state")
+
+STATE_DIR = paths.state_dir()
 STATE_PATH = STATE_DIR / "exposure_state.json"
 
 # Missy's authoritative position scans (newest-by-mtime).
-POSITION_SCAN_DIR = "/data/missy-data/position_scans"
+POSITION_SCAN_DIR = paths.position_scan_dir()
 
 # A position scan older than this is not trusted for reconciliation: acting
 # on stale scan data would mis-count exposure in either direction.

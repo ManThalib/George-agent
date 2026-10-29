@@ -107,7 +107,9 @@ class CloseRefreshTests(unittest.TestCase):
     # -- helpers ---------------------------------------------------------
     def _fake_sheldon(self):
         self.sheldon_calls.append(1)
-        return ("ok: WAKE_GEORGE: 1 signal(s)", "WAKE_GEORGE: 1")
+        # _run_sheldon_reentry returns (status, stdout, stderr); the follow-up
+        # is triggered by the WAKE_GEORGE marker in either stream.
+        return ("ok: 1 signal(s)", "WAKE_GEORGE: 1", "")
 
     def _seed_scan(self):
         """An old scan so a refresh must produce a newer mtime."""

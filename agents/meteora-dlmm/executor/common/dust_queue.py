@@ -4,10 +4,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from common import paths
 from common.utils import load_json, write_json
 
 
-DATA_DIR = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/data/dust_swaps")
+DATA_DIR = paths.dust_swaps_dir()
 PENDING_DIR = DATA_DIR / "pending"
 REVIEWED_DIR = DATA_DIR / "reviewed"
 

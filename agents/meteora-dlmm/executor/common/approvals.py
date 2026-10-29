@@ -6,8 +6,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from common import paths
 
-APPROVALS_DIR = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/approvals")
+
+APPROVALS_DIR = paths.approvals_dir()
 PENDING_DIR = APPROVALS_DIR / "pending"
 APPROVED_DIR = APPROVALS_DIR / "approved"
 REJECTED_DIR = APPROVALS_DIR / "rejected"

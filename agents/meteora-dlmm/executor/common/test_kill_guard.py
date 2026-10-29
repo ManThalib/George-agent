@@ -26,9 +26,12 @@ EXECUTOR_DIR = Path(__file__).resolve().parent
 METEORA_DIR = EXECUTOR_DIR.parent.parent
 DISPATCHER = EXECUTOR_DIR / "dispatcher.py"
 RUN_PIPELINE = Path("/root/.openclaw-devdash/workspace/run_pipeline.sh")
-LIVE_KILL = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/KILL")
 
 sys.path.insert(0, str(EXECUTOR_DIR.parent))
+
+from common import paths  # noqa: E402
+
+LIVE_KILL = paths.kill_file()
 
 
 class DispatcherExitCodeTest(unittest.TestCase):
@@ -78,6 +81,10 @@ class DispatcherExitCodeTest(unittest.TestCase):
                  dispatcher._capital_epilogue) = orig
 
 
+@unittest.skipUnless(
+    RUN_PIPELINE.exists(),
+    "run_pipeline.sh is not present on this host (the driver lives outside this checkout)",
+)
 class DriverKillTest(unittest.TestCase):
     """Real subprocess: the driver must stop before screening."""
 
@@ -86,7 +93,7 @@ class DriverKillTest(unittest.TestCase):
         if LIVE_KILL.exists():
             self.skipTest("KILL already present; refusing to touch owner state")
         self._scan_before = max(
-            [p.stat().st_mtime for p in Path("/data/missy-data/pool_screens")
+            [p.stat().st_mtime for p in paths.pool_scan_dir()
              .glob("pool_scan-*.json")] or [0])
 
     def tearDown(self):
@@ -105,7 +112,7 @@ class DriverKillTest(unittest.TestCase):
         self.assertNotIn("Pipeline run complete", proc.stdout)
         self.assertNotIn("Running Missy pool screener", proc.stdout)
         after = max([p.stat().st_mtime for p in
-                     Path("/data/missy-data/pool_screens")
+                     paths.pool_scan_dir()
                      .glob("pool_scan-*.json")] or [0])
         self.assertEqual(after, self._scan_before,
                          "a killed cycle must not produce a new pool scan")

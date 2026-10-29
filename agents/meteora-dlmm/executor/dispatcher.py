@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from common.utils import utc_now, load_json, rails_hash
+from common import paths
 from common.config_loader import ConfigError, load_config
 from common.journal import append as journal_append
 from common.rails_loader import RAILS_PATH, load_rails
@@ -41,6 +42,16 @@ from common.signal_validator import (
     signal_age_seconds,
     validate_core,
 )
+from common.chain_client import ChainError, simulate as chain_simulate, send as chain_send
+from common import live_preflight
+from common import mirror
+import common.approvals as approvals_store
+import common.dust_queue as dust_queue
+import common.exposure_guard as exposure_guard
+from common.redact import redact_url
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "ledger"))
+import ledger as trade_ledger  # noqa: E402  (executor-local ledger module)
 
 
 # --------------------------------------------------------------------------
@@ -54,16 +65,6 @@ def _cached_rails_hash(rails_path: str) -> str:
     if rails_path not in _rails_hash_cache:
         _rails_hash_cache[rails_path] = rails_hash(Path(rails_path))
     return _rails_hash_cache[rails_path]
-from common.chain_client import ChainError, simulate as chain_simulate, send as chain_send
-from common import live_preflight
-from common import mirror
-import common.approvals as approvals_store
-import common.dust_queue as dust_queue
-import common.exposure_guard as exposure_guard
-from common.redact import redact_url
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "ledger"))
-import ledger as trade_ledger  # noqa: E402  (executor-local ledger module)
 
 
 def _resolve_signals_dir() -> Path:
@@ -75,14 +76,14 @@ def _resolve_signals_dir() -> Path:
     """
     raw = os.environ.get("GEORGE_SIGNALS_DIR", "").strip()
     if not raw:
-        return Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/signals")
+        return paths.signals_dir()
     path = Path(raw)
     return path.parent if path.name == "pending" else path
 
 
 SIGNALS_DIR = _resolve_signals_dir()
 FAILED_VERIFY_DIR = SIGNALS_DIR / "failed_verify"
-KILL_FILE = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/KILL")
+KILL_FILE = paths.kill_file()
 
 # Exit status for an owner-initiated KILL halt. Distinct from 1 (cycle
 # failure) so monitoring can tell "stopped on purpose" from "broke".
@@ -93,14 +94,12 @@ EXIT_KILLED = 75
 # re-reads balances and Sheldon re-evaluates (emitting the open when funded).
 # Repo root for the sibling agents. Overridable so the same executor works in
 # the /data layout and in the dev workspace checkout.
-_AGENTS_ROOT = os.environ.get(
-    "AGENTS_ROOT", "/root/.openclaw-devdash/workspace/agents"
-)
+_AGENTS_ROOT = str(paths.agents_root())
 WALLET_REFRESH_SCRIPT = os.environ.get(
     "WALLET_REFRESH_SCRIPT",
     f"{_AGENTS_ROOT}/missy-agent/wallet_screener/run_wallet.sh",
 )
-WALLET_SCAN_DIR = "/data/missy-data/wallet_screens"
+WALLET_SCAN_DIR = paths.wallet_scan_dir()
 POSITION_REFRESH_SCRIPT = os.environ.get(
     "POSITION_REFRESH_SCRIPT",
     f"{_AGENTS_ROOT}/missy-agent/position_screener/run_positions.sh",
@@ -116,21 +115,18 @@ SHELDON_CYCLE_CMD = [
     # capital-refresh re-entry saw 2 stale CLOSE_EMITTED entries and blocked
     # every open. Live paths are the driver's (GEORGE_STATE_DIR etc.), with
     # the same defaults run_pipeline.sh exports when the env is absent.
-    "--pools-dir", os.environ.get("MISSY_POOL_SCAN_DIR", "/data/missy-data/pool_screens"),
-    "--positions-dir", os.environ.get("MISSY_POSITION_SCAN_DIR", "/data/missy-data/position_scans"),
-    "--wallet-scans-dir", WALLET_SCAN_DIR,
-    "--state-dir", os.environ.get(
-        "GEORGE_STATE_DIR",
-        "/data/.openclaw/workspace-agents-george/agents/meteora-dlmm/state"),
-    "--memory-dir", os.environ.get(
-        "GEORGE_MEMORY_DIR",
-        "/data/.openclaw/workspace-agents-george/agents/meteora-dlmm/memory"),
+    "--pools-dir", os.environ.get(
+        "MISSY_POOL_SCAN_DIR", str(paths.pool_scan_dir())),
+    "--positions-dir", os.environ.get(
+        "MISSY_POSITION_SCAN_DIR", str(paths.position_scan_dir())),
+    "--wallet-scans-dir", str(WALLET_SCAN_DIR),
+    "--state-dir", os.environ.get("GEORGE_STATE_DIR", str(paths.state_dir())),
+    "--memory-dir", os.environ.get("GEORGE_MEMORY_DIR", str(paths.agent_root() / "memory")),
     "--signals-dir", os.environ.get(
-        "GEORGE_SIGNALS_DIR",
-        "/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/signals/pending"),
+        "GEORGE_SIGNALS_DIR", str(SIGNALS_DIR / "pending")),
 ]
-REENTRY_STATE_PATH = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/state/capital_reentry.json")
-LOCK_PATH = Path("/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/state/dispatcher.lock")
+REENTRY_STATE_PATH = paths.state_dir() / "capital_reentry.json"
+LOCK_PATH = paths.state_dir() / "dispatcher.lock"
 MAX_CAPITAL_REENTRIES_PER_HOUR = 8
 # Close bursts are bounded per close (one follow-up each) but a burst of
 # several closes in one hour must not starve on the swap cap (owner-approved
