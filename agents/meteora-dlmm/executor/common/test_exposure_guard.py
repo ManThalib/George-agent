@@ -252,5 +252,75 @@ class BackfillTests(unittest.TestCase):
         self.assertEqual(entry["position_id"], "pdaM")
 
 
+class ScanSnapshotTests(unittest.TestCase):
+    """One read of the newest scan serves positions, freshness and completeness."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def _write(self, name, payload, mtime=None):
+        path = os.path.join(self.dir, name)
+        with open(path, "w") as fh:
+            json.dump(payload, fh)
+        if mtime is not None:
+            os.utime(path, (mtime, mtime))
+        return path
+
+    def test_snapshot_reports_all_three_facts_at_once(self):
+        self._write("position_scan-1.json",
+                    {"positions": [{"pool_address": "P", "status": "active"}],
+                     "history_complete": True})
+        snap = exposure_guard.load_scan(self.dir)
+        self.assertEqual(len(snap.positions), 1)
+        self.assertGreater(snap.mtime, 0)
+        self.assertTrue(snap.history_complete)
+        self.assertTrue(snap.path.endswith("position_scan-1.json"))
+
+    def test_newest_by_mtime_wins_over_filename(self):
+        self._write("position_scan-999.json",
+                    {"positions": [{"pool_address": "OLD"}],
+                     "history_complete": True}, mtime=1000)
+        self._write("position_scan-001.json",
+                    {"positions": [{"pool_address": "NEW"}],
+                     "history_complete": True}, mtime=2000)
+        snap = exposure_guard.load_scan(self.dir)
+        self.assertEqual(snap.positions[0]["pool_address"], "NEW")
+
+    def test_closed_and_failed_files_are_excluded(self):
+        self._write("position_scan-1.json.failed",
+                    {"positions": [{"pool_address": "X"}]})
+        self._write("position_scan-2.json",
+                    {"positions": [{"pool_address": "OK"},
+                                   {"pool_address": "GONE", "status": "closed"}]})
+        snap = exposure_guard.load_scan(self.dir)
+        self.assertEqual([p["pool_address"] for p in snap.positions], ["OK"])
+
+    def test_missing_directory_is_empty_not_an_error(self):
+        snap = exposure_guard.load_scan(os.path.join(self.dir, "nope"))
+        self.assertEqual(snap.positions, [])
+        self.assertEqual(snap.mtime, 0.0)
+        self.assertFalse(snap.history_complete)
+        self.assertIsNone(snap.path)
+
+    def test_partial_walk_is_reported_incomplete(self):
+        self._write("position_scan-1.json",
+                    {"positions": [], "history_complete": False})
+        self.assertFalse(exposure_guard.load_scan(self.dir).history_complete)
+
+    def test_legacy_scan_without_the_flag_counts_as_complete(self):
+        self._write("position_scan-1.json", {"positions": []})
+        self.assertTrue(exposure_guard.load_scan(self.dir).history_complete)
+
+    def test_wrappers_agree_with_the_snapshot(self):
+        self._write("position_scan-1.json",
+                    {"positions": [{"pool_address": "P"}], "history_complete": True})
+        snap = exposure_guard.load_scan(self.dir)
+        self.assertEqual(exposure_guard.load_scan_positions(self.dir),
+                         (snap.positions, snap.mtime))
+        self.assertEqual(exposure_guard.scan_history_complete(self.dir),
+                         snap.history_complete)
+
+
 if __name__ == "__main__":
     unittest.main()

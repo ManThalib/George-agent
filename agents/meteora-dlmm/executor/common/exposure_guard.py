@@ -13,7 +13,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from common import paths
 
@@ -454,12 +454,21 @@ def record_claim_executed(signal: Dict[str, Any],
     save_state(state, path)
 
 
-def load_scan_positions(positions_dir: Optional[str] = None,
-                        prefix: str = "position_scan") -> Tuple[List[Dict[str, Any]], float]:
-    """Newest Missy position scan as (non-closed positions, scan mtime).
+class ScanSnapshot(NamedTuple):
+    """One read of the newest Missy position scan."""
+    positions: List[Dict[str, Any]]
+    mtime: float
+    history_complete: bool
+    path: Optional[str]
 
-    Selection is by mtime, not filename, so parallel scan families are
-    ordered by freshness. Returns ([], 0.0) when no scan is readable.
+
+def load_scan(positions_dir: Optional[str] = None,
+              prefix: str = "position_scan") -> ScanSnapshot:
+    """Newest position scan, read ONCE.
+
+    load_scan_positions() and scan_history_complete() used to glob, sort and
+    parse the same file independently, and the dispatcher called both — two
+    reads (and two chances to see different files) for one decision.
     """
     import glob
 
@@ -470,23 +479,36 @@ def load_scan_positions(positions_dir: Optional[str] = None,
         key=os.path.getmtime,
     )
     if not paths:
-        return [], 0.0
+        return ScanSnapshot([], 0.0, False, None)
     path = paths[-1]
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except Exception:
-        return [], 0.0
     try:
         mtime = os.path.getmtime(path)
     except OSError:
         mtime = 0.0
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return ScanSnapshot([], mtime, False, path)
+
     positions = data.get("positions", []) if isinstance(data, dict) else data
     if not isinstance(positions, list):
-        return [], mtime
-    return [p for p in positions
-            if isinstance(p, dict) and p.get("pool_address")
-            and p.get("status") != "closed"], mtime
+        positions = []
+    open_rows = [p for p in positions
+                 if isinstance(p, dict) and p.get("pool_address")
+                 and p.get("status") != "closed"]
+    # A scan declares complete walk history; a partial scan (RPC failure
+    # mid-walk) must never drive removals. Defaults to True for older scans
+    # that predate the flag.
+    flag = data.get("history_complete") if isinstance(data, dict) else None
+    return ScanSnapshot(open_rows, mtime, True if flag is None else bool(flag), path)
+
+
+def load_scan_positions(positions_dir: Optional[str] = None,
+                        prefix: str = "position_scan") -> Tuple[List[Dict[str, Any]], float]:
+    """Newest Missy position scan as (non-closed positions, scan mtime)."""
+    snapshot = load_scan(positions_dir, prefix)
+    return snapshot.positions, snapshot.mtime
 
 
 def scan_history_complete(positions_dir: Optional[str] = None,
@@ -494,28 +516,9 @@ def scan_history_complete(positions_dir: Optional[str] = None,
     """True when the newest scan declares complete walk history.
 
     Missy position scanners stamp ``history_complete`` after a full walk;
-    a partial scan (RPC failure mid-walk) must never drive removals in
-    reconcile_positions — absence is only evidence when the walk was
-    complete. Defaults to True when the flag is missing (older scans),
-    matching the pre-flag behavior of the absence checks.
+    absence is only evidence when the walk was complete.
     """
-    import glob
-
-    directory = positions_dir or POSITION_SCAN_DIR
-    paths = sorted(
-        (p for p in glob.glob(os.path.join(directory, prefix + "-*.json"))
-         if not p.endswith((".failed", ".invalid"))),
-        key=os.path.getmtime,
-    )
-    if not paths:
-        return False
-    try:
-        with open(paths[-1], "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except Exception:
-        return False
-    flag = data.get("history_complete") if isinstance(data, dict) else None
-    return True if flag is None else bool(flag)
+    return load_scan(positions_dir, prefix).history_complete
 
 
 def _scan_key(position: Dict[str, Any]) -> Tuple[str, str]:

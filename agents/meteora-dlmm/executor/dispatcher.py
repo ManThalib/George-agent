@@ -372,10 +372,10 @@ def _reconcile_exposure() -> None:
     Never raises: reconciliation is a safety net, not a gate.
     """
     try:
-        positions, mtime = exposure_guard.load_scan_positions()
-        complete = exposure_guard.scan_history_complete()
+        scan = exposure_guard.load_scan()
         report = exposure_guard.reconcile_positions(
-            positions, scan_mtime=mtime, history_complete=complete)
+            scan.positions, scan_mtime=scan.mtime,
+            history_complete=scan.history_complete)
         if report.get("skipped"):
             print(f"[{utc_now()}] exposure reconcile skipped: {report['skipped']}")
             return
