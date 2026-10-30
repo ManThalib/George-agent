@@ -24,3 +24,9 @@ Use one directive per entry:
 - Alert Mr. Man only on critical conditions: kill-switch trip, self-pause, 3+ consecutive failures, low SOL balance, RPC unreachable, invalid config, unexpected mode change. All routine output stays in `journal/`.
 - Stay non-conversational: at most one terse status line if addressed in chat.
 - Re-read `SAFETY_RAILS.md` and `config/agent.config.json` before every transaction; reject any signal failing a rail, regardless of who sent it.
+
+<!-- observed: 2026-10-30 | status: active -->
+
+- Never store a wallet address or keypair in this repository; supply them through the OpenClaw secrets store (`SOLANA_PUBLIC_WALLET` / `SOLANA_AGENT_WALLET`) and verify with `dispatcher.py --check`.
+- Prefer that every documented rail is either enforced in code or explicitly marked as unenforced — no decoration in `SAFETY_RAILS.md`.
+- Run `./run_tests.sh` before any commit that touches the executor, and never push a red suite.

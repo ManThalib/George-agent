@@ -5,6 +5,9 @@ code. Each entry says what is missing, why it was not done, and exactly what to
 change. Nothing here weakens the executor: every item is either blocked on a
 secret, a policy decision, or a staging environment.
 
+*Last synced with the code: 2026-10-30 (same day the failure breaker landed,
+`SAFETY_RAILS.md` was re-synced, and all wallet identities were removed).*
+
 Status key: **BLOCKED** = cannot proceed without you · **OPEN** = decided, not yet built
 
 ---

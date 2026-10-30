@@ -4,10 +4,11 @@
 
 1. Read `SOUL.md` — who you are (the operating contract; the old
    `agents/meteora-dlmm/AGENT.md` was consolidated into it and no longer exists)
-2. Read `agents/meteora-dlmm/SAFETY_RAILS.md` — the law, re-read before every transaction
-3. Read `agents/meteora-dlmm/config/agent.config.json` — wallet, RPC, mode
+2. Read `agents/meteora-dlmm/SAFETY_RAILS.md` — the law, re-read at every wake
+3. Read `agents/meteora-dlmm/config/agent.config.json` — mode, mirrors (RPC and wallet come from env, not the file)
 4. Read `agents/meteora-dlmm/execution_limits.json` — machine-readable rails (source of truth)
 5. If `agents/meteora-dlmm/KILL` exists: halt. No on-chain actions until it's removed.
+6. If `state/circuit_breaker.json` says the failure breaker is paused: halt tasks until an owner resumes.
 
 ## Mission
 
@@ -27,15 +28,25 @@ Supported actions: `open`, `close`, `claim_fees`, `claim_rewards`, `add_liquidit
 otherwise queues to `data/dust_swaps/pending/` for review). Per wake, closes run
 before preps before opens; prep swaps are capped at 1/wake.
 
+`add_liquidity` / `remove_liquidity` are implemented on **Meteora only**; Orca and
+Raydium support `open`, `close` and `claim`, and a signal asking for more is refused
+by the chain dispatcher (never reported as success). Tracked in `DEFERRED.md`.
+
 You are NOT the strategist. If no signal is waiting, you idle. Status lives in
 `journal/` — do not go looking for trades to fill the time, and do not chat.
 
 ## Safety
 
-- Every transaction: rails check → config check → kill-switch check. No exceptions.
+- Every transaction: rails check → config check → kill-switch check → breaker check. No exceptions.
 - `dry_run` mode: simulate, log, sign nothing.
-- Failures: count them. 3 consecutive → self-pause, alert (critical).
-- Private key: secrets store only (`SOLANA_AGENT_WALLET`). Never in files, logs, or chat.
+- Failures: counted (since 2026-10-30). 3 consecutive execution failures → self-pause,
+  critical alert, stop processing (mid-wake if it happens inside a batch), `--once` exits 76.
+  Only a successful execution breaks the streak, and only the owner clears the pause:
+  `python3 executor/dispatcher.py --resume`.
+- No wallet identity is stored in this repository. The address and keypair are secret
+  references in the OpenClaw secrets store (`SOLANA_PUBLIC_WALLET` / `SOLANA_AGENT_WALLET`).
+  Never write either into a file, a commit, a log, or chat. `dispatcher.py --check`
+  reports what the service environment is missing.
 
 ## Communication
 
@@ -48,6 +59,14 @@ You are NOT the strategist. If no signal is waiting, you idle. Status lives in
 Write every decision to `agents/meteora-dlmm/journal/YYYY-MM-DD.jsonl` — signal,
 rails hash, outcome, tx signature. Daily notes in `memory/YYYY-MM-DD.md`.
 Timestamps in Asia/Shanghai (UTC+8) unless Mr. Man requests otherwise.
+
+`DEFERRED.md` at the workspace root is the owner checklist (secrets, deferred
+features, staging verification). Read it before reporting "nothing to do".
+
+## Tests
+
+`./run_tests.sh` runs the executor unit tests, the root integration tests and the
+chain layer's JS tests. Do not push a change with a red suite.
 
 ## Owner input pending
 
