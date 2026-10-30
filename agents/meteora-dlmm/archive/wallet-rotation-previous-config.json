@@ -12,13 +12,14 @@
     "version": "0.1.0"
   },
   "wallet": {
-    "public_key": "QNsxSBe2tHb7RSQYh6TUBUQA2wD93PvPP5Jg3qUxPvj",
-    "_comment": "Public address — safe in files. Env var SOLANA_PUBLIC_WALLET overrides if set.",
+    "public_key": "",
+    "_public_key_note": "Removed 2026-10-30 (owner instruction): wallet identities live in the OpenClaw secrets store, not in archived files. This file is kept for the non-secret history (mode, rpc, mirrors shape).",
+    "_comment": "Public address was removed for security. Nothing here is authoritative.",
     "_secret_key_handling": {
       "method": "openclaw_secrets_store",
       "secret_ref": "SOLANA_AGENT_WALLET",
-      "how": "Say 'store the wallet key' in chat. Jarvis will request it via a masked secret prompt — the private key is never visible in chat, logs, or files.",
-      "never": "Do NOT paste the private key into this file or into chat."
+      "how": "Store the keypair in OpenClaw's secrets store and expose it to the service as SOLANA_AGENT_WALLET.",
+      "never": "Do NOT paste the private key or the wallet address into this file or into chat."
     },
     "mirrors": [],
     "_mirrors_comment": "Multi-wallet mirror: [{wallet_id, public_key}]. A mirror follows MAIN's decisions with its own keypair (env SOLANA_WALLET_<ID>, stored in the secrets store) and its own capital. Empty = single-wallet (current behavior). Mirrors have no brain: no scoring, no independent policy.",

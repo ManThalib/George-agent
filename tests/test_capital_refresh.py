@@ -57,7 +57,7 @@ class PrepSwapSignalTests(unittest.TestCase):
     def _cfg(self):
         return {
             "rpc_https_url": "https://rpc.test",
-            "wallet_public_key": "QNsxSBe2tHb7RSQYh6TUBUQA2wD93PvPP5Jg3qUxPvj",
+            "wallet_public_key": "TestMainWa11etAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         }
 
     def test_buy_prep_swap_validates(self):

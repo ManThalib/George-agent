@@ -33,7 +33,12 @@ def load_config() -> Dict[str, Any]:
     public_key = os.environ.get("SOLANA_PUBLIC_WALLET", wallet.get("public_key", "")).strip()
     rpc_https = os.environ.get("SOLANA_RPC_URL", rpc.get("https_url", "")).strip()
     if not public_key:
-        raise ConfigError("wallet.public_key is required (set SOLANA_PUBLIC_WALLET or agent.config.json)")
+        raise ConfigError(
+            "wallet.public_key is required. No wallet identity is stored in "
+            "this repository (owner instruction 2026-10-30): expose "
+            "SOLANA_PUBLIC_WALLET (address) and SOLANA_AGENT_WALLET (keypair) "
+            "from the OpenClaw secrets store. Run --check to see what is missing."
+        )
     if not rpc_https:
         raise ConfigError("rpc.https_url is required (set SOLANA_RPC_URL or agent.config.json)")
     mode = cfg.get("agent", {}).get("mode", "dry_run")

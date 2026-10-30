@@ -71,7 +71,7 @@ RAILS = {
 CFG = {
     "rpc_https_url": "https://rpc.test",
     "signal_max_age_seconds": 300,
-    "wallet_public_key": "QNsxSBe2tHb7RSQYh6TUBUQA2wD93PvPP5Jg3qUxPvj",
+    "wallet_public_key": "TestMainWa11etAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 }
 
 

@@ -107,7 +107,9 @@ class DispatcherCheckWiringTests(unittest.TestCase):
             Path(__file__).resolve().parent.parent / "dispatcher.py"
         ).read_text(encoding="utf-8")
         self.assertNotIn("rpc_https_url', '')[:60]", src)
-        self.assertIn("redact_url(cfg.get('rpc_https_url'", src)
+        self.assertIn("redact_url(rpc)", src)
+        # And the wallet is never printed in full either.
+        self.assertIn("_redact_key(wallet)", src)
 
     def test_do_check_output_contains_no_api_key_substring(self):
         """End-to-end: run do_check and scan everything it printed."""
@@ -119,15 +121,18 @@ class DispatcherCheckWiringTests(unittest.TestCase):
         import dispatcher  # noqa: E402
 
         key = KEY
+        url = "https://mainnet.helius-rpc.com/?api-key=" + key
         cfg = {
             "mode": "dry_run",
-            "wallet_public_key": "B8qv53pKyW2sgP4VYik1GkkZ6NHNZZn6K5VTyVm55tTa",
-            "rpc_https_url": "https://mainnet.helius-rpc.com/?api-key=" + key,
+            "wallet_public_key": "Test01dWa11etCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+            "rpc_https_url": url,
         }
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
+            # The environment takes precedence over the file (that is what the
+            # executor actually uses), so pin both to the same value.
             with patch.dict(os.environ, {"SOLANA_PUBLIC_WALLET": "x",
-                                        "SOLANA_RPC_URL": "x"}):
+                                         "SOLANA_RPC_URL": url}):
                 dispatcher.do_check(cfg)
         out = buf.getvalue()
 

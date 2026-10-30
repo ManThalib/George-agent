@@ -43,8 +43,8 @@ def _write_cfg(path: Path, mode: str, public_key: str = None) -> None:
 
 
 # Two distinct public-shaped addresses for drift tests (not keys).
-OLD_WALLET = "B8qv53pKyW2sgP4VYik1GkkZ6NHNZZn6K5VTyVm55tTa"
-NEW_WALLET = "3EoKDhdvCH8pbTdnVruT3Z1sa7rdpYJ4qh18UoxSVc9A"
+OLD_WALLET = "Test01dWa11etCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+NEW_WALLET = "TestNewWa11etDDDDDDDDDDDDDDDDDDDDDDDDDDDD"
 
 
 class GateCliTestBase(unittest.TestCase):

@@ -12,13 +12,14 @@
     "version": "0.1.0"
   },
   "wallet": {
-    "public_key": "3EoKDhdvCH8pbTdnVruT3Z1sa7rdpYJ4qh18UoxSVc9A",
-    "_comment": "Public address \u2014 safe in files. Env var SOLANA_PUBLIC_WALLET overrides if set.",
+    "public_key": "",
+    "_public_key_note": "INTENTIONALLY EMPTY (owner instruction, 2026-10-30). The wallet identity is a SECRET reference in the OpenClaw secrets store, never a file value: expose SOLANA_PUBLIC_WALLET (address) and SOLANA_AGENT_WALLET (keypair) to the service via OpenClaw. Until both are present config validation fails closed and George cannot execute anything.",
+    "_comment": "No wallet address or key is stored in this repository. SOLANA_PUBLIC_WALLET supplies the address.",
     "_secret_key_handling": {
       "method": "openclaw_secrets_store",
       "secret_ref": "SOLANA_AGENT_WALLET",
-      "how": "Say 'store the wallet key' in chat. Jarvis will request it via a masked secret prompt \u2014 the private key is never visible in chat, logs, or files.",
-      "never": "Do NOT paste the private key into this file or into chat."
+      "how": "Store the keypair in OpenClaw's secrets store and expose it to the service as SOLANA_AGENT_WALLET. The private key is never visible in chat, logs, or files.",
+      "never": "Do NOT paste the private key or the wallet address into this file, into chat, or into a commit."
     },
     "mirrors": [],
     "_mirrors_comment": "Multi-wallet mirror: [{wallet_id, public_key}]. A mirror follows MAIN's decisions with its own keypair (env SOLANA_WALLET_<ID>, stored in the secrets store) and its own capital. Empty = single-wallet (current behavior). Mirrors have no brain: no scoring, no independent policy.",

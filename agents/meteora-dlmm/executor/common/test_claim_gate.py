@@ -17,7 +17,7 @@ CFG = {
     "rpc_https_url": "https://rpc.example",
     "rpc_fallback_urls": [],
     "rpc_fallback_delay_seconds": 15,
-    "wallet_public_key": "QNsxSBe2tHb7RSQYh6TUBUQA2wD93PvPP5Jg3qUxPvj",
+    "wallet_public_key": "TestMainWa11etAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     "mode": "auto",
 }
 
@@ -92,7 +92,7 @@ class MirrorLegTests(unittest.TestCase):
     """Mirror expansion: structural copy, gated opens, drift records."""
 
     REGISTRY = {
-        "main": "QNsxSBe2tHb7RSQYh6TUBUQA2wD93PvPP5Jg3qUxPvj",
+        "main": "TestMainWa11etAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         "w2": "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T",
     }
 

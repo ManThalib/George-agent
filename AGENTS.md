@@ -51,8 +51,9 @@ Timestamps in Asia/Shanghai (UTC+8) unless Mr. Man requests otherwise.
 
 ## Owner input pending
 
-The wallet has been rotated (`wallet.public_key` now `B8qv53…5tTa`) and the key lives
-in the secrets store. `rpc.https_url` is intentionally empty in the file — set the
-`SOLANA_RPC_URL` env var (fallback: `rpc.fallback_https_urls`). Until config validates
-(rpc reachable + secret present), you may not execute anything — report what's
-missing and wait.
+No wallet identity is stored in this repository (owner instruction, 2026-10-30).
+The address and keypair live in the OpenClaw secrets store and reach the service as
+`SOLANA_PUBLIC_WALLET` / `SOLANA_AGENT_WALLET`. `rpc.https_url` is likewise empty in
+the file — set `SOLANA_RPC_URL` (fallback: `rpc.fallback_https_urls`). Until config
+validates (rpc reachable + wallet + secret present), you may not execute anything —
+report what's missing and wait. Owner checklist: `DEFERRED.md`.

@@ -17,7 +17,7 @@ WSOL = "So11111111111111111111111111111111111111112"
 TOKEN_B = "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS"
 
 CFG = {"rpc_https_url": "https://rpc.example",
-       "wallet_public_key": "QNsxSBe2tHb7RSQYh6TUBUQA2wD93PvPP5Jg3qUxPvj"}
+       "wallet_public_key": "TestMainWa11etAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}
 
 RAILS = {
     "sol_overhead_lamports": {"meteora": 45_000_000, "orca": 30_000_000,

@@ -1797,22 +1797,63 @@ def do_sweep_dust_swaps(cfg: Dict[str, Any], rails: Dict[str, Any]) -> None:
     print(f"\nSweep complete: executed={len(executed_ids)}, failed={len(failed_ids)}, skipped duplicates={len(skipped_ids)}")
 
 
-def do_check(cfg: Dict[str, Any]) -> None:
+def do_check(cfg: Optional[Dict[str, Any]] = None) -> None:
+    """Health check that works even when the config does not validate.
+
+    This is the diagnostic an owner runs *because* something is missing, so it
+    must not require a valid config: it reads the file best-effort and reports
+    what is present. Wallet values are shown truncated (first/last four) —
+    a health check is not a place to print an address in full, let alone a key.
+    """
+    raw: Dict[str, Any] = {}
+    if cfg is None:
+        try:
+            raw = load_json(paths.config_path())
+        except Exception as exc:
+            print(f"  config: UNREADABLE ({type(exc).__name__}: {exc})")
+    agent_cfg = raw.get("agent") or {}
+    wallet_cfg = raw.get("wallet") or {}
+    rpc_cfg = raw.get("rpc") or {}
+
+    mode = cfg.get("mode") if cfg else agent_cfg.get("mode")
+    wallet = (os.environ.get("SOLANA_PUBLIC_WALLET", "").strip()
+              or (str(cfg.get("wallet_public_key") or "").strip() if cfg else "")
+              or str(wallet_cfg.get("public_key") or "").strip())
+    rpc = (os.environ.get("SOLANA_RPC_URL", "").strip()
+           or (str(cfg.get("rpc_https_url") or "").strip() if cfg else "")
+           or str(rpc_cfg.get("https_url") or "").strip())
+    signer = bool(os.environ.get("SOLANA_AGENT_WALLET", "").strip())
+
     print("Executor health check")
-    print(f"  mode: {cfg.get('mode')}")
-    print(f"  wallet: {cfg.get('wallet_public_key')}")
+    print(f"  mode: {mode}")
+    print(f"  wallet: {_redact_key(wallet)}")
+    print(f"  signer: {'present' if signer else 'MISSING'}")
     # Never print the endpoint raw: it usually carries the API key in its
     # query string, and truncation preserves a recoverable prefix of it.
-    print(f"  rpc: {redact_url(cfg.get('rpc_https_url', ''))}")
+    print(f"  rpc: {redact_url(rpc)}")
+
     missing = []
-    if not os.environ.get("SOLANA_PUBLIC_WALLET") and not cfg.get("wallet_public_key"):
+    if not wallet:
         missing.append("SOLANA_PUBLIC_WALLET")
-    if not os.environ.get("SOLANA_RPC_URL") and not cfg.get("rpc_https_url"):
+    if not rpc:
         missing.append("SOLANA_RPC_URL")
+    if not signer:
+        missing.append("SOLANA_AGENT_WALLET")
     if missing:
-        print(f"  MISSING env/config: {', '.join(missing)}")
+        print(f"  MISSING (set via OpenClaw secrets store): {', '.join(missing)}")
+        print("  executor cannot sign or reach the chain until these exist; "
+              "see DEFERRED.md")
     else:
         print("  env: ok")
+
+
+def _redact_key(value: str) -> str:
+    """First/last four characters, or a placeholder when unset."""
+    if not value:
+        return "<unset>"
+    if len(value) <= 10:
+        return "<set>"
+    return f"{value[:4]}…{value[-4:]}"
 
 
 def main() -> None:
@@ -1825,6 +1866,12 @@ def main() -> None:
     parser.add_argument("--sweep-dust-swaps", action="store_true", help="Execute pending dust swaps now (auto mode only)")
     parser.add_argument("--check", action="store_true", help="Health check")
     args = parser.parse_args()
+
+    # The health check exists to diagnose a config that does not validate (a
+    # missing wallet, an unset RPC), so it must run before validation.
+    if args.check:
+        do_check()
+        return
 
     cfg = load_config()
     rails = load_rails()
@@ -1843,9 +1890,6 @@ def main() -> None:
         return
     if args.sweep_dust_swaps:
         do_sweep_dust_swaps(cfg, rails)
-        return
-    if args.check:
-        do_check(cfg)
         return
 
     if args.once:

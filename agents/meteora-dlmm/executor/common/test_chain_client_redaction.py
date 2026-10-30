@@ -34,7 +34,7 @@ LEAKY_URL = "https://mainnet.helius-rpc.com/?api-key=" + KEY
 
 REQ = {"dex": "meteora", "action": "open", "mode": "simulate",
        "rpc_url": "https://api.mainnet-beta.solana.com",
-       "wallet_public_key": "B8qv53pKyW2sgP4VYik1GkkZ6NHNZZn6K5VTyVm55tTa"}
+       "wallet_public_key": "Test01dWa11etCCCCCCCCCCCCCCCCCCCCCCCCCCCC"}
 
 
 def _proc(returncode=0, stdout="", stderr=""):
