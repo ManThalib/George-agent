@@ -44,6 +44,17 @@ fail if one reappears.
 It reports `wallet / signer / rpc` separately and lists what is missing. It is
 deliberately runnable without a valid config.
 
+**Known gap created by removing the file value:** `config_gate.py` used to refuse
+when the live and workspace `agent.config.json` copies named *different* wallets
+(the 2026-10-19 incident: reports tracked one wallet while the executor signed
+with another). Both copies are empty now, so that check has nothing to compare
+and is inert by construction. The equivalent guarantee must come from OpenClaw:
+**George, Missy and Sheldon must all see the same `SOLANA_PUBLIC_WALLET`**, or
+position scans and exposure figures will describe a different wallet than the one
+signing. If you want it enforced in code again, the check to add is
+env-vs-scan (`SOLANA_PUBLIC_WALLET` against the wallet id in Missy's newest scan);
+say so and it is a small change.
+
 ---
 
 ## 2. orca / raydium `add_liquidity` and `remove_liquidity` (OPEN — your call later)
