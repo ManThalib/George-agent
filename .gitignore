@@ -23,3 +23,7 @@ agents/meteora-dlmm/KILL
 # Runtime backup files
 *.bak
 *.bak-*
+
+# Circuit breaker runtime state (self-pause record)
+agents/meteora-dlmm/state/circuit_breaker.json
+agents/meteora-dlmm/state/dispatcher.lock

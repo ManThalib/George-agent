@@ -49,6 +49,7 @@ from common.chain_client import ChainError, simulate as chain_simulate, send as 
 from common import live_preflight
 from common import mirror
 import common.approvals as approvals_store
+import common.circuit_breaker as circuit_breaker
 import common.dust_queue as dust_queue
 import common.exposure_guard as exposure_guard
 from common.redact import redact_url
@@ -115,6 +116,10 @@ KILL_FILE = paths.kill_file()
 # Exit status for an owner-initiated KILL halt. Distinct from 1 (cycle
 # failure) so monitoring can tell "stopped on purpose" from "broke".
 EXIT_KILLED = 75
+
+# Exit status for a self-pause (circuit breaker). Distinct from both: a paused
+# executor is not broken, and it is not a healthy cycle either.
+EXIT_PAUSED = 76
 
 # --- Capital refresh chain (swap -> wallet rescan -> Sheldon re-entry) ---
 # After a successful prep swap the wallet changed; Missy's wallet screener
@@ -1487,6 +1492,12 @@ def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> List[Dict[str, Any]]
             print(f"[{utc_now()}] KILL file present; halting.")
             return executed
 
+        paused, reason = circuit_breaker.is_paused()
+        if paused:
+            print(f"[{utc_now()}] SELF-PAUSED; not processing signals: {reason}. "
+                  f"Owner action: `dispatcher.py --resume`.")
+            return executed
+
         # Keep exposure state aligned with the authoritative on-chain scan
         # before evaluating any new signal (evidence-based; stale scan is
         # skipped).
@@ -1502,7 +1513,16 @@ def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> List[Dict[str, Any]]
         max_preps = _max_preps_per_run()
         preps_done = 0
         deferred_preps: List[str] = []
-        for signal_path in pending:
+        for index, signal_path in enumerate(pending):
+            # The breaker can trip mid-wake (e.g. the third failure in this
+            # batch). Stop immediately rather than continuing to sign: the
+            # remaining signals stay pending, owned by the next wake after an
+            # owner resumes.
+            paused, reason = circuit_breaker.is_paused()
+            if paused:
+                print(f"[{utc_now()}] SELF-PAUSED mid-wake ({reason}); "
+                      f"leaving {len(pending) - index} signal(s) pending.")
+                break
             # Bound prep swaps per wake: a doorbell backlog must not fire
             # several preps at once. Closes/claims are never deferred. A prep
             # that is already stale never takes a slot — it is rejected by
@@ -1557,6 +1577,34 @@ def run_once(cfg: Dict[str, Any], rails: Dict[str, Any]) -> List[Dict[str, Any]]
                   f"{len(deferred_preps)} prep signal(s) to the next wake: "
                   f"{', '.join(deferred_preps)}")
     return executed
+
+
+def _record_outcome(status: str, details: Dict[str, Any],
+                    rails: Dict[str, Any]) -> None:
+    """Feed one signal outcome to the consecutive-failure breaker.
+
+    Only execution failures count; a rejection or a queued swap is a decision,
+    not a failure. A successful execution clears both streaks. Never raises:
+    breaker bookkeeping must not turn a handled outcome into a crash.
+    """
+    try:
+        if status == "executed":
+            circuit_breaker.record_success()
+            return
+        if status != "failed":
+            return
+        rpc = circuit_breaker.looks_like_rpc_error(
+            json.dumps(details, default=str))
+        result = circuit_breaker.record_failure(rpc=rpc, rails=rails)
+        if result.get("tripped"):
+            _notify_owner(
+                f"SELF-PAUSE {result['reason']} signal={details.get('signal_id')} "
+                f"stage={details.get('stage')} error={str(details.get('error'))[:200]}. "
+                f"No further transactions until an owner runs "
+                f"`dispatcher.py --resume`."
+            )
+    except Exception as exc:
+        print(f"[{utc_now()}] circuit breaker update failed: {exc}")
 
 
 def _record_decision(signal: Dict[str, Any], decision: str,
@@ -1616,6 +1664,9 @@ def process_signal_path(signal_path: Path, cfg: Dict[str, Any], rails: Dict[str,
 
     _record_decision(signal, journal_status, details,
                      ledger=(status == "executed"))
+    # Count the failure AFTER journaling, so the audit trail exists before the
+    # alert and before the executor stops.
+    _record_outcome(status, {"signal_id": signal_id, **details}, rails)
     return status, details
 
 
@@ -1856,6 +1907,19 @@ def _redact_key(value: str) -> str:
     return f"{value[:4]}…{value[-4:]}"
 
 
+def do_resume(note: str = "owner ran dispatcher.py --resume") -> None:
+    """Owner action: clear a self-pause imposed by the failure breaker."""
+    paused, reason = circuit_breaker.is_paused()
+    state = circuit_breaker.resume(note)
+    if paused:
+        print(f"RESUMED: cleared self-pause ({reason})")
+    else:
+        print("RESUMED: breaker was not paused; streaks cleared")
+    print(f"  consecutive_failures: {state['consecutive_failures']}")
+    print(f"  total_failures (lifetime): {state['total_failures']}")
+    print("  the pause is not automatic next time: the same rail will trip again")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="George multi-DEX executor dispatcher")
     parser.add_argument("--once", action="store_true", help="Run one cycle and exit")
@@ -1865,12 +1929,20 @@ def main() -> None:
     parser.add_argument("--list-dust-swaps", action="store_true", help="List swap_to_usdc signals pending review")
     parser.add_argument("--sweep-dust-swaps", action="store_true", help="Execute pending dust swaps now (auto mode only)")
     parser.add_argument("--check", action="store_true", help="Health check")
+    parser.add_argument("--resume", action="store_true",
+                        help="Clear a self-pause imposed by the failure circuit breaker")
     args = parser.parse_args()
 
     # The health check exists to diagnose a config that does not validate (a
     # missing wallet, an unset RPC), so it must run before validation.
     if args.check:
         do_check()
+        return
+
+    # Resuming is an owner decision that must work even when the config is
+    # unusable (that is often why the executor stopped).
+    if args.resume:
+        do_resume()
         return
 
     cfg = load_config()
@@ -1902,6 +1974,13 @@ def main() -> None:
             print(f"[{utc_now()}] KILLED: halted by KILL file; no signals "
                   f"processed (exit {EXIT_KILLED}).")
             sys.exit(EXIT_KILLED)
+        paused, reason = circuit_breaker.is_paused()
+        if paused:
+            # A self-pause is neither a healthy cycle nor a crash: distinct
+            # status so monitoring pages a human instead of restarting.
+            print(f"[{utc_now()}] PAUSED: {reason} (exit {EXIT_PAUSED}). "
+                  f"Owner action: dispatcher.py --resume")
+            sys.exit(EXIT_PAUSED)
         if incomplete:
             # Owner decision 2026-10-10 (#20): an incomplete close-refresh is
             # a failed cycle for automation/monitoring purposes.
