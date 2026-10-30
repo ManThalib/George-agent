@@ -60,8 +60,46 @@ say so and it is a small change.
 
 ---
 
-## 2. orca / raydium `add_liquidity` and `remove_liquidity` (OPEN — your call later)
+## 0. Branch state: the recenter line is parked (resolved 2026-10-30)
 
+`main` (the GitHub default branch) and `master` had diverged on the same base
+commit. `main` carried **`3d791ee` — "recenter action, duplicate-open guard,
+journal replay, chain rate limiting/retries"** (+575 lines, 2026-10-29), which the
+2026-10-29/30 audit never saw; `master` carried the audit and the docs.
+
+Resolution: `main` was fast-forwarded to the audited line and the feature commit
+was preserved on its own branch:
+
+| Ref | Points at | Contents |
+|---|---|---|
+| `main` | audit + docs | **default branch** — audited, documented code |
+| `master` | audit + docs | identical to `main` |
+| `feature/recenter-2026-10-29` | `3d791ee` | recenter, duplicate-open guard, journal replay, rate limiting |
+
+**Why it was not merged straight in:** the feature commit adds `recenter`,
+`Curve` and `BidAsk` to `VALID_ACTIONS`, the builder and the validator — but
+`dexes/meteora/chain.js` implements none of them. `Curve`/`BidAsk` are sent to the
+chain as literal action names, so before the 2026-10-30 `dispatch.js` fix those
+requests returned `{ok: true}` with **no transaction**; today they fail closed.
+`Curve`/`BidAsk` also need more than plumbing: the chain open path hardcodes
+`StrategyType.Spot`.
+
+**To do when you want it (one task, not a blind merge):**
+
+1. `recenter` — composable to close+open in Python, so it can work; needs its
+   close/open legs wired into the refactored dispatch, priority map and
+   close-refresh set.
+2. `journal replay`, `duplicate-open guard`, `chain rate limiting/retries` — these
+   live in `journal.py`, `exposure_guard.py`, `chain_client.py` and merge mostly
+   cleanly; re-apply them onto `main`.
+3. `Curve` / `BidAsk` — decide: implement (`StrategyType` from the signal) or
+   reject at validation. They must not ship as accepted-but-unexecutable actions.
+
+Until then, treat `3d791ee` as a reference implementation, not deployable code.
+
+---
+
+## 2. orca / raydium `add_liquidity` and `remove_liquidity` (OPEN — your call later)
 **State:** `validate_core` accepts both actions for **every** DEX, but the Orca
 and Raydium chain handlers export no such function. Since the 2026-10-30 change,
 `chain/dispatch.js` fails such a request closed ("dex X does not implement action
