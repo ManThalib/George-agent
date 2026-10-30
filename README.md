@@ -140,6 +140,14 @@ cd agents/meteora-dlmm/executor && python3 -m unittest discover -s common
 cd agents/meteora-dlmm/executor && npm test                  # chain layer (JS)
 ```
 
+## Owner checklist
+
+`DEFERRED.md` lists what is blocked on you: the OpenClaw secrets (wallet address,
+keypair, RPC URL), the Orca/Raydium add/remove decision, staging verification of
+the JS chain layer, and the still-committed runtime state. No wallet identity is
+stored in this repository by design; `dispatcher.py --check` reports what the
+service environment is missing.
+
 ## Workspace Files
 
 This repository is George's entire workspace. Agent identity and memory files are included by design:
