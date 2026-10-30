@@ -174,9 +174,10 @@ def _check_side(signal: Dict[str, Any], action: str) -> None:
     """Validate side declaration and liquidity consistency for mutations.
 
     Accepts missing side for backwards compatibility (assumed bidirectional).
-    For explicit one-sided positions the supplied liquidity must match the
-    chosen side; a remove on the X side with non-zero Y bps, or vice versa,
-    is rejected because the chain instruction would act on the wrong token.
+    For explicit one-sided mutations the declined side must be zero: the
+    declared side is the one the instruction acts on (for removes, the side the
+    bps applies to), so a non-zero amount on the OTHER side would make the
+    chain instruction act on the wrong token.
     """
     side = (signal.get("side") or "bidirectional").lower()
     if side not in {"bidirectional", "x", "y"}:
@@ -192,6 +193,11 @@ def _check_side(signal: Dict[str, Any], action: str) -> None:
         amount_y = int(liq.get("amount_y", 0))
     except (TypeError, ValueError):
         amount_y = 0
+    # For removes the bps applies to the chosen side; ensure the other side is
+    # zero when side is x/y. A non-zero amount on the CHOSEN side is the point
+    # of the mutation, not an error — the previous remove-only block rejected
+    # exactly that, which made every well-formed one-sided remove invalid
+    # (owner ruling 2026-10-30: follow the comment, not the inverted check).
     if side == "x" and amount_y != 0:
         raise SignalValidationError(
             f"{action} side=x but liquidity.amount_y is non-zero"
@@ -200,17 +206,6 @@ def _check_side(signal: Dict[str, Any], action: str) -> None:
         raise SignalValidationError(
             f"{action} side=y but liquidity.amount_x is non-zero"
         )
-    # For removes the bps applies to the chosen side; ensure one side is
-    # explicitly zero when side is x/y.
-    if action == "remove_liquidity":
-        if side == "x" and amount_x != 0:
-            raise SignalValidationError(
-                "remove_liquidity side=x but liquidity.amount_x is non-zero"
-            )
-        if side == "y" and amount_y != 0:
-            raise SignalValidationError(
-                "remove_liquidity side=y but liquidity.amount_y is non-zero"
-            )
 
 
 def _check_swap_to_usdc(signal: Dict[str, Any], cfg: Dict[str, Any], rails: Dict[str, Any]) -> None:

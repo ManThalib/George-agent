@@ -126,6 +126,46 @@ class TestAddRemoveValidator(unittest.TestCase):
         out = meteora_validator.validate(out, CFG, RAILS)
         self.assertEqual(out["action"], "remove_liquidity")
 
+    # --- one-sided removes ------------------------------------------------
+    # The bps applies to the declared side, so the OTHER side must be zero.
+    # The old code rejected a non-zero amount on the declared side instead,
+    # which made every well-formed one-sided remove fail (3h, 2026-10-30).
+
+    def test_side_x_remove_with_non_zero_x_is_accepted(self):
+        out = validate_core(
+            _valid_remove(side="x", liquidity={"amount_x": "1000", "amount_y": "0"}),
+            CFG, RAILS)
+        self.assertEqual(out["action"], "remove_liquidity")
+
+    def test_side_y_remove_with_non_zero_y_is_accepted(self):
+        out = validate_core(
+            _valid_remove(side="y", liquidity={"amount_x": "0", "amount_y": "1000"}),
+            CFG, RAILS)
+        self.assertEqual(out["action"], "remove_liquidity")
+
+    def test_side_x_remove_with_non_zero_y_is_rejected(self):
+        with self.assertRaises(SignalValidationError) as ctx:
+            validate_core(
+                _valid_remove(side="x",
+                              liquidity={"amount_x": "1000", "amount_y": "1"}),
+                CFG, RAILS)
+        self.assertIn("side=x", str(ctx.exception))
+        self.assertIn("amount_y", str(ctx.exception))
+
+    def test_side_y_remove_with_non_zero_x_is_rejected(self):
+        with self.assertRaises(SignalValidationError) as ctx:
+            validate_core(
+                _valid_remove(side="y",
+                              liquidity={"amount_x": "1", "amount_y": "1000"}),
+                CFG, RAILS)
+        self.assertIn("side=y", str(ctx.exception))
+        self.assertIn("amount_x", str(ctx.exception))
+
+    def test_remove_without_liquidity_or_side_still_valid(self):
+        """Most remove signals carry neither; absence means bidirectional."""
+        out = validate_core(_valid_remove(), CFG, RAILS)
+        self.assertEqual(out["action"], "remove_liquidity")
+
     def test_remove_bps_10000_rejected_full_removal_is_close(self):
         bad = _valid_remove(bps=10000)
         with self.assertRaises(SignalValidationError):
